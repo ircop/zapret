@@ -2,6 +2,7 @@
 
 # TODO:
 # + RESOLVERS
+# - Config file
 # - IP blockinig when no other params in content block
 # - Subnet blocking when no other params in content block
 # + Content cleanup after removal
@@ -60,10 +61,9 @@ my @resolvers = (
 );
 
 # Mail:
-#my @mail_to = ( 'wingman@ip-home.net', 'noc@ip-home.net' );
-my @mail_to = ( 'noc@ip-home.net' );
-my $smtp_from = 'zapret@ip-home.net';
-my $smtp_host = '109.206.159.40';
+my @mail_to = ( 'noc@provider.com' );
+my $smtp_from = 'zapret@provider.com';
+my $smtp_host = 'mail.provider.com';
 my $smtp_port = 25;
 my $smtp_login = 'zapret@provider.com';
 my $smtp_password = 'zapret_mail_pw';
