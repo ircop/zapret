@@ -172,7 +172,7 @@ sub getResult {
     	    exit;
     	}
     } else {
-	unlink $dir.'/dump.xlm';
+	unlink $dir.'/dump.xml';
 	unlink $dir.'/arch.zip';
 	unlink $dir.'/dump.xml.sig';
 	
