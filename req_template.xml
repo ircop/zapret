@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="windows-1251"?>
+<request>
+<requestTime>{{TIME}}</requestTime>
+<operatorName>ООО "Рога и Копыта"</operatorName>
+<inn>1111111111</inn>
+<ogrn>1111111111111</ogrn>
+<email>noc@provider.com</email>
+</request>

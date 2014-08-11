@@ -39,19 +39,14 @@ my $dir = File::Basename::dirname($0);
 my $Config = {};
 Config::Simple->import_from($dir.'/zapret.conf', $Config) or die "Can't open ".$dir."/zapret.conf for reading!\n";
 
-#my $api_url = "http://vigruzki.rkn.gov.ru/services/OperatorRequestTest/?wsdl";
-#my $api_url = "http://vigruzki.rkn.gov.ru/services/OperatorRequest/?wsdl";
 my $api_url = $Config->{'API.url'} || die "API.url not defined.";
-
-my $inn = $Config->{'OPERATOR.inn'} || die "OPERATOR.inn not defined.";
-my $ogrn = $Config->{'OPERATOR.ogrn'} || die "OPERATOR.ogrn not defined.";
-my $email = $Config->{'OPERATOR.email'} || die "OPERATOR.email not defined.";
-my $operator_name = $Config->{'OPERATOR.name'} || die "OPERATOR.name not defined.";
 
 my $req_file = $Config->{'PATH.req_file'} || die "PATH.req_file not defined.";
 $req_file = $dir."/".$req_file;
 my $sig_file = $Config->{'PATH.sig_file'} || die "PATH.sig_file not defined.";
 $sig_file = $dir."/".$sig_file;
+my $template_file = $Config->{'PATH.template_file'} || die "PATH.template_file not defined.";
+$template_file = $dir."/".$template_file;
 
 my $db_host = $Config->{'DB.host'} || die "DB.host not defined.";
 my $db_user = $Config->{'DB.user'} || die "DB.user not defined.";
@@ -77,7 +72,6 @@ my $mail_alone = $Config->{'MAIL.alone'} || 1;
 
 
 my $debug = 1;
-
 
 ######## End config #####
 
@@ -243,22 +237,20 @@ sub formRequest {
 	$tz =~ s/(\d{2})(\d{2})/$1:$2/;
 	my $dt = strftime("%Y-%m-%dT%H:%M:%S", localtime($now)) . $tz;
 	
-	my $txt = '<?xml version="1.0" encoding="windows-1251"?>
-<request>
-<requestTime>'.$dt.'</requestTime>
-<operatorName>'.$operator_name.'</operatorName>
-<inn>'.$inn.'</inn>
-<ogrn>'.$ogrn.'</ogrn>
-<email>'.$email.'</email>
-</request>
-';
+	my $buf = '';
+	my $new = '';
+	open TMPL, "<", $template_file or die "Can't open ".$template_file." for reading!\n";
+	while( <TMPL> ) {
+		my $line = $_;
+		$line =~ s/{{TIME}}/$dt/g;
+		$new .= $line;
+	}
+	close TMPL;
 	
-	open F, '>'.$req_file || die $!;
-		binmode(F, ':utf8');
-		print F $txt;
-	close F;
+	open REQ, ">", $req_file;
+	print REQ $new;
+	close REQ;
 	
-	# Signature
 	`openssl smime -sign -in $req_file -out $sig_file -binary -signer $dir/cert.pem -outform DER`;
 };
 
