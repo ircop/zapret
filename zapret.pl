@@ -30,49 +30,54 @@ use Net::Nslookup;
 use Net::SMTP;
 use POSIX;
 use POSIX qw(strftime);
+use Config::Simple;
+use File::Basename;
 
 ######## Config #########
 
+my $dir = File::Basename::dirname($0);
+my $Config = {};
+Config::Simple->import_from($dir.'/zapret.conf', $Config) or die "Can't open ".$dir."/zapret.conf for reading!\n";
+
 #my $api_url = "http://vigruzki.rkn.gov.ru/services/OperatorRequestTest/?wsdl";
-my $api_url = "http://vigruzki.rkn.gov.ru/services/OperatorRequest/?wsdl";
+#my $api_url = "http://vigruzki.rkn.gov.ru/services/OperatorRequest/?wsdl";
+my $api_url = $Config->{'API.url'} || die "API.url not defined.";
+
+my $inn = $Config->{'OPERATOR.inn'} || die "OPERATOR.inn not defined.";
+my $ogrn = $Config->{'OPERATOR.ogrn'} || die "OPERATOR.ogrn not defined.";
+my $email = $Config->{'OPERATOR.email'} || die "OPERATOR.email not defined.";
+my $operator_name = $Config->{'OPERATOR.name'} || die "OPERATOR.name not defined.";
+
+my $req_file = $Config->{'PATH.req_file'} || die "PATH.req_file not defined.";
+$req_file = $dir."/".$req_file;
+my $sig_file = $Config->{'PATH.sig_file'} || die "PATH.sig_file not defined.";
+$sig_file = $dir."/".$sig_file;
+
+my $db_host = $Config->{'DB.host'} || die "DB.host not defined.";
+my $db_user = $Config->{'DB.user'} || die "DB.user not defined.";
+my $db_pass = $Config->{'DB.password'} || die "DB.password not defined.";
+my $db_name = $Config->{'DB.name'} || die "DB.name not defined.";
+
+my $resolve = $Config->{'NS.resolve'} || die "NS.resolve not defined.";
+my @resolvers = $Config->{'NS.resolvers'} || die "NS.resolvers not defined.";
+
+my @mail_to = $Config->{'MAIL.to'} || die "MAIL.to not defined.";
+my $smtp_from = $Config->{'MAIL.from'} || die "MAIL.from not defined.";
+my $smtp_host = $Config->{'MAIL.server'} || die "MAIL.server not defined.";
+my $smtp_port = $Config->{'MAIL.port'} || die "MAIL.port not defined.";
+my $smtp_login = $Config->{'MAIL.login'} || die "MAIL.login not defined.";
+my $smtp_password = $Config->{'MAIL.password'} || die "MAIL.password not defined.";
+
+my $mail_excludes = $Config->{'MAIL.excludes'} || 1;
+my $mail_new = $Config->{'MAIL.new'} || 1;
+my $mail_new_ips = $Config->{'MAIL.new_ips'} || 1;
+my $mail_removed = $Config->{'MAIL.removed'} || 1;
+my $mail_removed_ips = $Config->{'MAIL.removed_ips'} || 1;
+my $mail_alone = $Config->{'MAIL.alone'} || 1;
+
 
 my $debug = 1;
 
-# THIS MUST BE IN CP1251! 
-my $operator_name = 'ООО "Рога и Копыта"';
-my $inn = '1231231231';
-my $ogrn = '1231231231231';
-my $email = 'noc@provider.com';
-
-# Files and dirs
-my $dir = '/opt/zapret';
-my $req_file = $dir.'/req2.xml';
-my $sig_file = $dir.'/req2.xml.sig';
-
-my $db_host = 'db.provider.com';
-my $db_user = 'zapret';
-my $db_pass = 'zapret_pw';
-my $db_name = 'zapret_db';
-
-my $resolve = 1;
-my @resolvers = (
-    '10.10.10.10',
-    '8.8.8.8'
-);
-
-# Mail:
-my @mail_to = ( 'noc@provider.com' );
-my $smtp_from = 'zapret@provider.com';
-my $smtp_host = 'mail.provider.com';
-my $smtp_port = 25;
-my $smtp_login = 'zapret@provider.com';
-my $smtp_password = 'zapret_mail_pw';
-my $mail_excludes = 1;
-my $mail_new = 1;
-my $mail_new_ips = 1;
-my $mail_removed = 1;
-my $mail_removed_ips = 1;
-my $mail_alone = 1;			# Mail if there are subnets without domain/url in record
 
 ######## End config #####
 
