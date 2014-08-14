@@ -53,15 +53,17 @@ my $db_user = $Config->{'DB.user'} || die "DB.user not defined.";
 my $db_pass = $Config->{'DB.password'} || die "DB.password not defined.";
 my $db_name = $Config->{'DB.name'} || die "DB.name not defined.";
 
-my $resolve = $Config->{'NS.resolve'} || die "NS.resolve not defined.";
-my @resolvers = $Config->{'NS.resolvers'} || die "NS.resolvers not defined.";
+my $resolve = $Config->{'NS.resolve'} || 0;
+my @resolvers = $Config->{'NS.resolvers'} || ();
 
+my $mail_send = $Config->{'MAIL.send'} || 0;
 my @mail_to = $Config->{'MAIL.to'} || die "MAIL.to not defined.";
+my $smtp_auth = $Config->{'MAIL.auth'} || 0;
 my $smtp_from = $Config->{'MAIL.from'} || die "MAIL.from not defined.";
 my $smtp_host = $Config->{'MAIL.server'} || die "MAIL.server not defined.";
 my $smtp_port = $Config->{'MAIL.port'} || die "MAIL.port not defined.";
-my $smtp_login = $Config->{'MAIL.login'} || die "MAIL.login not defined.";
-my $smtp_password = $Config->{'MAIL.password'} || die "MAIL.password not defined.";
+my $smtp_login = $Config->{'MAIL.login'} || "";
+my $smtp_password = $Config->{'MAIL.password'} || "";
 
 my $mail_excludes = $Config->{'MAIL.excludes'} || 1;
 my $mail_new = $Config->{'MAIL.new'} || 1;
@@ -835,8 +837,15 @@ sub Mail {
 		    require MIME::Base64;
 		    require Authen::SASL;
 		} or do { print "Need MIME::Base64 and Authen::SASL to do smtp auth."; return; };
-	
-		$smtp->auth($smtp_login, $smtp_password) or do { print "Can't auth on smtp server; $!"; return; };
+		
+		
+		if( $smtp_auth eq '1' ) {
+		    if( $smtp_login eq '' || $smtp_password eq '' ) {
+			debug("ERROR! SMTP Auth is enabled, but no login and password defined!");
+			return;
+		    }
+		    $smtp->auth($smtp_login, $smtp_password) or do { print "Can't auth on smtp server; $!"; return; };
+		}
 	
 		$smtp->mail( $smtp_from );
 		$smtp->recipient( $to );
