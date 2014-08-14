@@ -359,7 +359,7 @@ sub parseDump
     
 #    print Dumper($data->{content});
     
-    foreach my $k (keys $data->{content}) {
+    foreach my $k (keys %{$data->{content}}) {
 	eval {
 	my ( $decision_number, $decision_org, $decision_date, $entry_type, $include_time );
 	$decision_number = $decision_org = $decision_date = $entry_type = '';
