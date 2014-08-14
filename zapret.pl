@@ -312,6 +312,7 @@ sub dbConnect {
     $DBH = DBI->connect_cached("DBI:mysql:database=".$db_name.";host=".$db_host,
     $db_user,
     $db_pass) or die DBI->errstr;
+    $DBH->do("set names utf8");
 };
 
 sub debug {
