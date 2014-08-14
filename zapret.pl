@@ -55,7 +55,6 @@ my $db_name = $Config->{'DB.name'} || die "DB.name not defined.";
 
 my $resolve = $Config->{'NS.resolve'} || 0;
 my @resolvers = $Config->{'NS.resolvers'} || ();
-my $resolve_old = $Config->{'NS.resolve_old'} || 0;
 
 my $mail_send = $Config->{'MAIL.send'} || 0;
 my @mail_to = $Config->{'MAIL.to'} || die "MAIL.to not defined.";
@@ -66,12 +65,12 @@ my $smtp_port = $Config->{'MAIL.port'} || die "MAIL.port not defined.";
 my $smtp_login = $Config->{'MAIL.login'} || "";
 my $smtp_password = $Config->{'MAIL.password'} || "";
 
-my $mail_excludes = $Config->{'MAIL.excludes'} || 1;
-my $mail_new = $Config->{'MAIL.new'} || 1;
-my $mail_new_ips = $Config->{'MAIL.new_ips'} || 1;
-my $mail_removed = $Config->{'MAIL.removed'} || 1;
-my $mail_removed_ips = $Config->{'MAIL.removed_ips'} || 1;
-my $mail_alone = $Config->{'MAIL.alone'} || 1;
+my $mail_excludes = $Config->{'MAIL.excludes'} || 0;
+my $mail_new = $Config->{'MAIL.new'} || 0;
+my $mail_new_ips = $Config->{'MAIL.new_ips'} || 0;
+my $mail_removed = $Config->{'MAIL.removed'} || 0;
+my $mail_removed_ips = $Config->{'MAIL.removed_ips'} || 0;
+my $mail_alone = $Config->{'MAIL.alone'} || 0;
 
 
 my $debug = 1;
