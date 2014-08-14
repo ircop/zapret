@@ -55,6 +55,7 @@ my $db_name = $Config->{'DB.name'} || die "DB.name not defined.";
 
 my $resolve = $Config->{'NS.resolve'} || 0;
 my @resolvers = $Config->{'NS.resolvers'} || ();
+my $resolve_old = $Config->{'NS.resolve_old'} || 0;
 
 my $mail_send = $Config->{'MAIL.send'} || 0;
 my @mail_to = $Config->{'MAIL.to'} || die "MAIL.to not defined.";
@@ -454,6 +455,7 @@ sub parseDump
 	set('lastDumpDate', time() );
 };
 
+
 # Cleanup old entries
 sub clearOld {
 	foreach my $domain ( keys %OLD_TRUE_DOMAINS ) {
@@ -723,7 +725,7 @@ sub getOld {
 	$sth->execute or die DBI->errstr;
 	while( my $ref = $sth->fetchrow_arrayref ) {
 		$OLD_DOMAINS{md5_hex($$ref[1])} = $$ref[0];
-		@{$OLD_TRUE_DOMAINS{md5_hex($$ref[1])}} = ( $$ref[2], $$ref[1] );
+		@{$OLD_TRUE_DOMAINS{md5_hex($$ref[1])}} = ( $$ref[2], $$ref[1], $$ref[0] );
 	}
 	
 	# URLs
@@ -731,7 +733,7 @@ sub getOld {
 	$sth->execute or die DBI->errstr;
 	while( my $ref = $sth->fetchrow_arrayref ) {
 		$OLD_URLS{md5_hex($$ref[2])} = $$ref[0];
-		@{$OLD_TRUE_URLS{md5_hex($$ref[2])}} = ( $$ref[0], $$ref[2] );
+		@{$OLD_TRUE_URLS{md5_hex($$ref[2])}} = ( $$ref[0], $$ref[2], $$ref[1] );
 	}
 	
 	# Subnets
@@ -778,7 +780,7 @@ sub Resolve {
 	
 	my @adrs = ();
 	eval {
-		@adrs = nslookup(domain => $domain, server => \@resolvers, timeout => 4 );
+		@adrs = nslookup(domain => $domain, server => @resolvers, timeout => 4 );
 	};
 	foreach( @adrs ) {
 		my $ip = $_;
