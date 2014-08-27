@@ -221,9 +221,15 @@ sub checkDumpDate {
 }
 sub getLastDumpDate
 {
-    my $soap= SOAP::Lite->service( $api_url );
-    my @result = $soap->getLastDumpDateEx();
-    if( $result[0] !~ /^(\d+)$/ ) {
+    eval {
+	my $soap= SOAP::Lite->service( $api_url );
+	my @result = $soap->getLastDumpDateEx();
+    };
+    if( $@ ) {
+	print "Error while getLastDumpDate: ".$@."\n";
+	exit;
+    }
+    if( !defined($result[0]) || $result[0] !~ /^(\d+)$/ ) {
 	print "Can't get lastDumpDateEx!";
 	print Dumper(@result);
 	exit;
