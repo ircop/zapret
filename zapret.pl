@@ -166,7 +166,7 @@ sub getResult {
 	exit;
     }
     
-    if( !defined( $result[0] ) ) {
+    if( !@result ) {
 	print "Result not defined!\n";
 	print Dumper( @result );
 	exit;
@@ -242,6 +242,12 @@ sub getLastDumpDate
 	print "Error while getLastDumpDate: ".$@."\n";
 	exit;
     }
+    
+    if( !@result ) {
+	print "Soap result not defined, exiting.\n";
+	exit;
+    }
+    
     if( !defined($result[0]) || $result[0] !~ /^(\d+)$/ ) {
 	print "Can't get lastDumpDateEx!";
 	print Dumper(@result);
