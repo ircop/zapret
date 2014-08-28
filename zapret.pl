@@ -155,15 +155,27 @@ if( $act == 0 ) {
 sub getResult {
     debug("Getting result...");
     
-    my $soap = SOAP::Lite->service( $api_url );
-    my @result = $soap->getResult( $lastCode );
+    my @result;
+    
+    eval {
+	my $soap = SOAP::Lite->service( $api_url );
+	@result = $soap->getResult( $lastCode );
+    };
+    if( $@ ) {
+	print "Error while getResult(): ".$@."\n";
+	exit;
+    }
+    
+    if( !defined( $result[0] ) ) {
+	print "Result not defined!\n";
+	print Dumper( @result );
+	exit;
+    }
     
     if( !($result[0] eq 'true' ) ) {
 	# Some error
 	my $comment = $result[1];
-#	    binmode(STDOUT, ':utf8');
 	    print "Can not get result: ".$comment."\n";
-#	print Dumper(@result);
 	# This is utf-8:
 	if( $result[2] == 0 ) {
 	    print "Query pending ( code: 0 )\n";
