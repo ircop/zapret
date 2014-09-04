@@ -76,6 +76,8 @@ my $form_request = $Config->{'API.form_request'} || 0;
 
 my $debug = 1;
 
+my $ldd_iterations = 0;
+
 ######## End config #####
 
 my $DBH;
@@ -233,6 +235,7 @@ sub checkDumpDate {
 }
 sub getLastDumpDate
 {
+    $ldd_iterations++;
     my @result;
     eval {
 	my $soap= SOAP::Lite->service( $api_url );
@@ -240,18 +243,35 @@ sub getLastDumpDate
     };
     if( $@ ) {
 	print "Error while getLastDumpDate: ".$@."\n";
-	exit;
+	if( $ldd_iterations < 4 ) {
+		print "Retrying...\n";
+		return getLastDumpDate();
+	} else {
+		print "3 attempts failed, giving up.\n";
+		exit;
+	}
     }
     
     if( !@result ) {
-	print "Soap result not defined, exiting.\n";
-	exit;
+	print "Soap result not defined, retrying...\n";
+	if( $ldd_iterations < 4 ) {
+		return getLastDumpDate();
+	} else {
+		print "3 attempts failed, giving up.\n";
+		exit;
+	}
     }
     
     if( !defined($result[0]) || $result[0] !~ /^(\d+)$/ ) {
 	print "Can't get lastDumpDateEx!";
 	print Dumper(@result);
-	exit;
+	if( $ldd_iterations < 4 ) {
+		print "Retrying...\n";
+		return getLastDumpDate();
+	} else {
+		print "3 attempts failed, giving up.\n";
+		exit;
+	}
     } else {
 	my $stamp = $result[0] / 1000;
 	return $stamp;
