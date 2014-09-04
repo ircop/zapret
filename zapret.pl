@@ -72,12 +72,12 @@ my $mail_removed = $Config->{'MAIL.removed'} || 0;
 my $mail_removed_ips = $Config->{'MAIL.removed_ips'} || 0;
 my $mail_alone = $Config->{'MAIL.alone'} || 0;
 
+my $form_request = $Config->{'API.form_request'} || 0;
 
 my $debug = 1;
 
 ######## End config #####
 
-#binmode(STDOUT, ':utf8');
 my $DBH;
 my ($lastDumpDateOld, $lastAction, $lastCode, $lastResult);
 dbConnect();
@@ -284,7 +284,10 @@ sub formRequest {
 sub sendRequest {
     debug( "Sending request...");
     
-    formRequest();
+    if( $form_request == 1 )
+    {
+	formRequest();
+    }
     
     my ( $req, $sig, $buf );
     
