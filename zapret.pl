@@ -1,19 +1,5 @@
 #!/usr/bin/perl -w
 
-# TODO:
-# + RESOLVERS
-# - Config file
-# - IP blockinig when no other params in content block
-# - Subnet blocking when no other params in content block
-# + Content cleanup after removal
-# + Mail functions
-# + Mail new ips
-# + Mail excludes
-# + Mail new domains, urls, subnets
-# + Mail deleted stuff
-# + Excludes
-# + utf md5
-
 use strict;
 use warnings;
 use SOAP::Lite;
@@ -22,25 +8,50 @@ use Data::Dumper;
 use MIME::Base64;
 use utf8;
 use XML::Simple;
-use URI;
+use URI 1.69;
 use NetAddr::IP;
-use Digest::MD5 qw(md5 md5_hex md5_base64);
+use Digest::MD5 qw(md5_hex);
 use Encode qw(encode_utf8);
-use Net::Nslookup;
 use Net::SMTP;
 use POSIX;
 use POSIX qw(strftime);
 use Config::Simple;
 use File::Basename;
+use Net::IP qw(:PROC);
+use AnyEvent;
+use AnyEvent::DNS;
+use Log::Log4perl;
+use Getopt::Long;
+use URI::UTF8::Punycode;
+
+binmode(STDOUT,':utf8');
+binmode(STDERR,':utf8');
+
 
 ######## Config #########
 
+my $openssl_bin_path="/usr/local/gost-ssl/bin";
+
 my $dir = File::Basename::dirname($0);
 my $Config = {};
-Config::Simple->import_from($dir.'/zapret.conf', $Config) or die "Can't open ".$dir."/zapret.conf for reading!\n";
+
+my $config_file=$dir.'/zapret.conf';
+my $force_load='';
+my $log_file=$dir."/zapret_log.conf";
+
+GetOptions("force_load" => \$force_load,
+	    "log=s" => \$log_file,
+	    "config=s" => \$config_file) or die "Error no command line arguments\n";
+
+Config::Simple->import_from($config_file, $Config) or die "Can't open ".$config_file." for reading!\n";
+
+Log::Log4perl::init( $log_file );
+
+my $logger=Log::Log4perl->get_logger();
+
+
 
 my $api_url = $Config->{'API.url'} || die "API.url not defined.";
-
 my $req_file = $Config->{'PATH.req_file'} || die "PATH.req_file not defined.";
 $req_file = $dir."/".$req_file;
 my $sig_file = $Config->{'PATH.sig_file'} || die "PATH.sig_file not defined.";
@@ -54,7 +65,36 @@ my $db_pass = $Config->{'DB.password'} || die "DB.password not defined.";
 my $db_name = $Config->{'DB.name'} || die "DB.name not defined.";
 
 my $resolve = $Config->{'NS.resolve'} || 0;
+
 my @resolvers = $Config->{'NS.resolvers'} || ();
+
+
+my @resolvers_new;
+
+foreach my $n (@{$resolvers[0]})
+{
+	push(@resolvers_new,AnyEvent::Socket::parse_address($n));
+}
+
+my $ipv6_nslookup = $Config->{'NS.ipv6_support'} || 0;
+if(lc($ipv6_nslookup) eq "true" || lc($ipv6_nslookup) eq "yes")
+{
+	$ipv6_nslookup=1;
+} else {
+	$ipv6_nslookup=0;
+}
+
+my $keep_resolved = $Config->{'NS.keep_resolved'} || 0;
+if(lc($keep_resolved) eq "yes" || lc($keep_resolved) eq "true")
+{
+	$keep_resolved=1;
+} else {
+	$keep_resolved=0;
+}
+
+my $dns_timeout = $Config->{'NS.timeout'} || 1;
+$dns_timeout = int($dns_timeout) if($dns_timeout);
+
 
 my $mail_send = $Config->{'MAIL.send'} || 0;
 my @mail_to = $Config->{'MAIL.to'} || die "MAIL.to not defined.";
@@ -74,9 +114,8 @@ my $mail_alone = $Config->{'MAIL.alone'} || 0;
 
 my $form_request = $Config->{'API.form_request'} || 0;
 
-my $debug = 1;
-
 my $ldd_iterations = 0;
+
 
 ######## End config #####
 
@@ -88,22 +127,22 @@ getParams();
 my %NEW = ();
 my %OLD = ();
 my %OLD_IPS = ();
+my %OLD_ONLY_IPS = ();
 my %OLD_DOMAINS = ();
 my %OLD_URLS = ();
 my %OLD_SUBNETS = ();
 my %OLD_TRUE = ();
 my %OLD_TRUE_IPS = ();
+my %OLD_TRUE_ONLY_IPS = ();
 my %OLD_TRUE_DOMAINS = ();
 my %OLD_TRUE_URLS = ();
 my %OLD_TRUE_SUBNETS = ();
-my %NEW_RECORDS = ();
-my %NEW_DOMAINS = ();
-my %NEW_URLS = ();
-my %NEW_IPS = ();
-my %NEW_SUBNETS = ();
 my %EX_IPS = ();
 my %EX_DOMAINS = ();
 my %EX_SUBNETS = ();
+
+
+my %resolver_cache;
 
 my $MAILTEXT = '';
 my $MAIL_ADDED = '';
@@ -113,172 +152,188 @@ my $MAIL_REMOVED_IPS = '';
 my $MAIL_EXCLUDES = '';
 my $MAIL_ALONE = '';
 
-debug("Last dump date:\t".$lastDumpDateOld);
-debug("Last action:\t".$lastAction);
-debug("Last code:\t".$lastCode);
-debug("Last result:\t".$lastResult);
+
+my $resolved_domains=0;
+my $deleted_old_domains=0;
+my $deleted_old_urls=0;
+my $deleted_old_ips=0;
+my $deleted_old_only_ips=0;
+my $deleted_old_subnets=0;
+my $deleted_old_records=0;
+my $added_ipv4_ips=0;
+my $added_ipv6_ips=0;
+my $added_domains=0;
+my $added_urls=0;
+my $added_subnets=0;
+my $added_records=0;
+
+$logger->debug("Last dump date:\t".$lastDumpDateOld);
+$logger->debug("Last action:\t".$lastAction);
+$logger->debug("Last code:\t".$lastCode);
+$logger->debug("Last result:\t".$lastResult);
 
 #############################################################
 
-# default action:
-my $act=0;
-if( $lastAction eq 'sendRequest' || $lastAction eq '' ) {
-    if( $lastResult eq 'send' ) {
-	getResult();
-	$act=1;
-    } else {
-	sendRequest();
-	$act=1;
-    }
-}
+my $start_time=localtime();
 
-if( $lastAction eq 'getResult' ) {
-    if( $lastResult eq 'err' ) {
-	sendRequest();
-	$act=1;
-    } else {
-	checkDumpDate();
-	$act=1;
-    }
-}
+$logger->info("Starting RKN at ".$start_time);
 
-if( $lastAction eq 'getLastDumpDate' ) {
-    checkDumpDate();
-    $act=1;
-}
-
-if( $act == 0 ) {
-    sendRequest();
-}
-
-#############################################################
-
-
-sub getResult {
-    debug("Getting result...");
-    
-    my @result;
-    
-    eval {
-	my $soap = SOAP::Lite->service( $api_url );
-	@result = $soap->getResult( $lastCode );
-    };
-    if( $@ ) {
-	print "Error while getResult(): ".$@."\n";
-	exit;
-    }
-    
-    if( !@result ) {
-	print "Result not defined!\n";
-	print Dumper( @result );
-	exit;
-    }
-    
-    if( !($result[0] eq 'true' ) ) {
-	# Some error
-	my $comment = $result[1];
-	    print "Can not get result: ".$comment."\n";
-	# This is utf-8:
-	if( $result[2] == 0 ) {
-	    print "Query pending ( code: 0 )\n";
-    	    exit;
-    	} else {
-    	    set('lastResult', 'err');
-    	    set('lastAction', 'getResult');
-    	    exit;
-    	}
-    } else {
-	unlink $dir.'/dump.xml';
-	unlink $dir.'/arch.zip';
-	unlink $dir.'/dump.xml.sig';
-	
-	my $zip = decode_base64($result[1]);
-
-	open F, '>'.$dir.'/arch.zip' || die "Can't open arch.zip for writing!\n".$! ;
-	binmode F;
-	print F $zip;
-	close F;
-	
-	`unzip -o $dir/arch.zip -d $dir/`;
-	debug("Got result, parsing dump.");
-	
-	set('lasltAction', 'getResult');
-	set('lastResult', 'got');
-	set('lastDumpDate', time);
-	
-	parseDump();
-    }
-}
-
-
-sub checkDumpDate {
-    debug("Checking dump date...");
-    my $lastDumpDate = getLastDumpDate();
-    debug("RKN last dump date: ".$lastDumpDate);
-    
-    if( $lastDumpDateOld eq '' || $lastDumpDate > $lastDumpDateOld ) {
-	# Update needed
-	debug("Last dump date > prev. dump date. Updating.");
-	if( sendRequest() == 1 ) {
-	    debug("Updating lastDumpDate = ".$lastDumpDate);
-	    set('lastDumpDate', $lastDumpDate);
-	    set('lastActionDate', time);
-	    return 1;
+if( $lastResult eq 'send' )
+{
+	$logger->info("Last request is send, waiting for the data...");
+	while (getResult())
+	{
+		$logger->info("Reestr not yet ready. Waiting...");
+		sleep(5);
 	}
-    } else {
-	debug("lastDumpDate <= prev. dump date. Exiting.");
-	set('lastAction', 'getLastDumpDate');
-	set('lastResult', 'old');
-	set('lastActionDate', time);
-	exit;
-    }
+	exit 0;
 }
+
+if(checkDumpDate())
+{
+	sendRequest();
+
+	while (getResult())
+	{
+		$logger->info("Reestr not yet ready. Waiting...");
+		sleep(5);
+	}
+}
+
+exit 0;
+
+sub getResult
+{
+	$logger->debug("Getting result...");
+
+	my $soap = SOAP::Lite->service( $api_url );
+
+
+	my @result;
+	eval
+	{
+		@result = $soap->getResult( $lastCode );
+	};
+
+	if( $@ )
+	{
+		$logger->fatal("Error while getResult(): ".$@);
+		exit;
+	}
+
+	if( !@result )
+	{
+		$logger->fatal("Result not defined!");
+		$logger->error( Dumper( @result ));
+		exit;
+	}
+
+	if( !($result[0] eq 'true' ) )
+	{
+		# Some error
+		my $comment = $result[1];
+		$logger->error("Can not get result: ".$comment);
+		# This is utf-8:
+		if( $result[2] == 0 )
+		{
+			return 1;
+		} else {
+			set('lastResult', 'err');
+			set('lastAction', 'getResult');
+			exit;
+		}
+	} else {
+		unlink $dir.'/dump.xml';
+		unlink $dir.'/arch.zip';
+		unlink $dir.'/dump.xml.sig';
+		my $zip = decode_base64($result[1]);
+
+		open F, '>'.$dir.'/arch.zip' || die "Can't open arch.zip for writing!\n".$! ;
+		binmode F;
+		print F $zip;
+		close F;
+	
+		`unzip -o $dir/arch.zip -d $dir/`;
+		$logger->debug("Got result, parsing dump.");
+
+		set('lasltAction', 'getResult');
+		set('lastResult', 'got');
+		set('lastDumpDate', time);
+
+		parseDump();
+		# статистика
+		$logger->info("Load iterations: ".$ldd_iterations.", resolved domains: ".$resolved_domains);
+		$logger->info("Added: domains: ".$added_domains.", urls: ".$added_urls.", IPv4 ips: ".$added_ipv4_ips.", IPv6 ips: ".$added_ipv6_ips.", subnets: ".$added_subnets.", records: ".$added_records);
+		$logger->info("Deleted: old domains: ".$deleted_old_domains.", old urls: ".$deleted_old_urls.", old ips: ".$deleted_old_ips.", old only ips: ".$deleted_old_only_ips.", old subnets: ".$deleted_old_subnets.", old records: ".$deleted_old_records);
+		my $stop_time=localtime();
+		$logger->info("Stopping RKN at ".$stop_time);
+	}
+	return 0;
+}
+
+
+sub checkDumpDate
+{
+	$logger->debug("Checking dump date...");
+	my $lastDumpDate = getLastDumpDate();
+	$logger->debug("RKN last dump date: ".$lastDumpDate);
+
+	if( $lastDumpDateOld eq '' || $lastDumpDate > $lastDumpDateOld || $force_load)
+	{
+		$logger->debug("lastDumpDate > prev. dump date. Working now.");
+		return 1;
+	}
+	$logger->info("lastDumpDate <= prev. dump date. Exiting.");
+	return 0;
+}
+
 sub getLastDumpDate
 {
-    $ldd_iterations++;
-    my @result;
-    eval {
-	my $soap= SOAP::Lite->service( $api_url );
-	@result = $soap->getLastDumpDateEx();
-    };
-    if( $@ ) {
-	print "Error while getLastDumpDate: ".$@."\n";
-	if( $ldd_iterations < 4 ) {
-		print "Retrying...\n";
-		return getLastDumpDate();
-	} else {
-		print "3 attempts failed, giving up.\n";
-		exit;
+	$ldd_iterations++;
+	my @result;
+	eval {
+		my $soap= SOAP::Lite->service( $api_url );
+		@result = $soap->getLastDumpDateEx();
+	};
+	if( $@ ) {
+		$logger->error("Error while getLastDumpDate: ".$@);
+		if( $ldd_iterations < 4 ) {
+			$logger->info("Retrying...");
+			return getLastDumpDate();
+		} else {
+			$logger->fatal("3 attempts failed, giving up");
+			exit;
+		}
 	}
-    }
-    
-    if( !@result ) {
-	print "Soap result not defined, retrying...\n";
-	if( $ldd_iterations < 4 ) {
-		return getLastDumpDate();
-	} else {
-		print "3 attempts failed, giving up.\n";
-		exit;
+
+	if( !@result ) {
+		$logger->error("Soap result not defined, retrying...");
+		if( $ldd_iterations < 4 ) {
+			return getLastDumpDate();
+		} else {
+			$logger->fatal("3 attempts failed, giving up.");
+			exit;
+		}
 	}
-    }
-    
-    if( !defined($result[0]) || $result[0] !~ /^(\d+)$/ ) {
-	print "Can't get lastDumpDateEx!";
-	print Dumper(@result);
-	if( $ldd_iterations < 4 ) {
-		print "Retrying...\n";
-		return getLastDumpDate();
+
+	if( !defined($result[0]) || $result[0] !~ /^(\d+)$/ ) {
+		$logger->error("Can't get lastDumpDateEx!");
+		$logger->error(print Dumper(@result));
+		if( $ldd_iterations < 4 ) {
+			$logger->info("Retrying...");
+			return getLastDumpDate();
+		} else {
+			$logger->fatal("3 attempts failed, giving up.");
+			exit;
+		}
 	} else {
-		print "3 attempts failed, giving up.\n";
-		exit;
+		my $stamp = $result[0] / 1000;
+		return $stamp;
 	}
-    } else {
-	my $stamp = $result[0] / 1000;
-	return $stamp;
-    }
 }
 
-sub formRequest {
+sub formRequest
+{
 	my $now = time();
 	my $tz = strftime("%z", localtime($now));
 	$tz =~ s/(\d{2})(\d{2})/$1:$2/;
@@ -298,202 +353,227 @@ sub formRequest {
 	print REQ $new;
 	close REQ;
 	
-	`openssl smime -sign -in $req_file -out $sig_file -binary -signer $dir/cert.pem -outform DER`;
-};
+	`$openssl_bin_path/openssl smime -sign -in $req_file -out $sig_file -binary -signer $dir/cert.pem -outform DER`;
+}
 
-sub sendRequest {
-    debug( "Sending request...");
-    
-    if( $form_request == 1 )
-    {
-	formRequest();
-    }
-    
-    my ( $req, $sig, $buf );
-    
-    # request
-    open F, '<'.$req_file || die $!;
-    binmode F;
-    while( (read F, $buf, 65536) != 0 ) {
-	$req .= $buf;
-    }
-    close F;
-    
-    # signature
-    open F, '<'.$sig_file || die $!;
-    binmode F;
-    while( (read F, $buf, 65536) != 0 ) {
-	$sig .= $buf;
-    }
-    close F;
-    
-    my $soap = SOAP::Lite->service( $api_url );
-    my @result =  $soap->sendRequest(
+sub sendRequest
+{
+	$logger->debug( "Sending request...");
+
+	if( $form_request == 1 )
+	{
+		formRequest();
+	}
+	my ( $req, $sig, $buf );
+
+	# request
+	open F, '<'.$req_file || die $!;
+	binmode F;
+	while( (read F, $buf, 65536) != 0 ) {
+		$req .= $buf;
+	}
+	close F;
+
+	# signature
+	open F, '<'.$sig_file || die $!;
+	binmode F;
+	while( (read F, $buf, 65536) != 0 ) {
+		$sig .= $buf;
+	}
+	close F;
+
+	my $soap = SOAP::Lite->service( $api_url );
+	my @result =  $soap->sendRequest(
 	$req,
 	$sig,
-	"2.0"
-    );
-    
-    my $res = $result[0];
-    if( $res eq 'true' ) {
-	# Everyhing OK
-	my $code = $result[2];
-	debug( $result[1] );
-	set('lastCode', $code);
-	set('lastAction', 'sendRequest');
-	set('lastActionDate', time );
-	set('lastResult', 'send');
-	return 1;
-    } else {
-	# Something goes wrong
-	my $code = $result[1];
-	debug("ERROR while sending request: ".$code);
-	set('lastResult', 'err');
-	die;
-    }
-    
-    binmode(STDOUT, ':utf8');
-};
+	"2.1"
+	);
+
+	my $res = $result[0];
+	if( $res eq 'true' ) {
+		# Everyhing OK
+		my $code = $result[2];
+		$logger->debug( $result[1] );
+		set('lastCode', $code);
+		set('lastAction', 'sendRequest');
+		set('lastActionDate', time );
+		set('lastResult', 'send');
+		return 1;
+	} else {
+		# Something goes wrong
+		my $code = $result[1];
+		$logger->debug("ERROR while sending request: ".$code);
+		set('lastResult', 'err');
+		die;
+	}
+}
 
 
 sub dbConnect {
-    $DBH = DBI->connect_cached("DBI:mysql:database=".$db_name.";host=".$db_host,
-    $db_user,
-    $db_pass) or die DBI->errstr;
-    $DBH->do("set names utf8");
-};
-
-sub debug {
-    my $txt = shift;
-    if( $debug == 1 ) {
-        print "DEBUG: " . $txt . "\n";
-    }
-};
+	$DBH = DBI->connect_cached("DBI:mysql:database=".$db_name.";host=".$db_host, $db_user, $db_pass,{mysql_enable_utf8 => 1}) or die DBI->errstr;
+	$DBH->do("set names utf8");
+}
 
 sub set {
-    my $param = shift;
-    my $value = shift;
-    my $sth = $DBH->prepare("UPDATE zap2_settings SET value = ? WHERE param = ?");
-    $sth->bind_param(1, $value);
-    $sth->bind_param(2, $param);
-    $sth->execute or die DBI->errstr;
-};
+	my $param = shift;
+	my $value = shift;
+	my $sth = $DBH->prepare("UPDATE zap2_settings SET value = ? WHERE param = ?");
+	$sth->bind_param(1, $value);
+	$sth->bind_param(2, $param);
+	$sth->execute or die DBI->errstr;
+}
+
 sub getParams {
-    my $sth = $DBH->prepare("SELECT param,value FROM zap2_settings");
-    $sth->execute or die DBI->errstr;
-    while( my $ref = $sth->fetchrow_arrayref ) {
-	if( $$ref[0] eq 'lastDumpDate' ) {
-	    $lastDumpDateOld = $$ref[1];
+	my $sth = $DBH->prepare("SELECT param,value FROM zap2_settings");
+	$sth->execute or die DBI->errstr;
+	while( my $ref = $sth->fetchrow_arrayref ) {
+		if( $$ref[0] eq 'lastDumpDate' )
+		{
+			$lastDumpDateOld = $$ref[1];
+		}
+		if( $$ref[0] eq 'lastAction' )
+		{
+			$lastAction = $$ref[1];
+		}
+		if( $$ref[0] eq 'lastCode' )
+		{
+			$lastCode = $$ref[1];
+		}
+		if( $$ref[0] eq 'lastResult' )
+		{
+			$lastResult = $$ref[1];
+		}
 	}
-	if( $$ref[0] eq 'lastAction' ) {
-	    $lastAction = $$ref[1];
-	}
-	if( $$ref[0] eq 'lastCode' ) {
-	    $lastCode = $$ref[1];
-	}
-	if( $$ref[0] eq 'lastResult' ) {
-	    $lastResult = $$ref[1];
-	}
-    }
-};
+}
 
 
 sub parseDump
 {
-    debug("Parsing dump...");
-    
-    my $xml = new XML::Simple;
-    my $data = $xml->XMLin($dir.'/dump.xml');
-    
-#    print Dumper($data->{content});
-    
-    foreach my $k (keys %{$data->{content}}) {
-	eval {
-	my ( $decision_number, $decision_org, $decision_date, $entry_type, $include_time );
-	$decision_number = $decision_org = $decision_date = $entry_type = '';
-	my $decision_id = $k;
-	$entry_type = '';
-	    my $content = $data->{content}->{$k};
-	    $decision_number = $content->{decision}->{number} if defined( $content->{decision}->{number} );
-	    $decision_org = $content->{decision}->{org} if defined( $content->{decision}->{org} );
-	    $decision_date = $content->{decision}->{date} if defined( $content->{decision}->{org} );
-	    $entry_type = $content->{entryType} if defined( $content->{entryType} );
-	    $include_time = $content->{includeTime} if defined( $content->{includeTime} );
+	$logger->debug("Parsing dump...");
+
+	my $xml = new XML::Simple;
+	my $data = $xml->XMLin($dir.'/dump.xml');
+	foreach my $k (keys %{$data->{content}})
+	{
+		eval {
+			my ( $decision_number, $decision_org, $decision_date, $entry_type, $include_time );
+			$decision_number = $decision_org = $decision_date = $entry_type = '';
+			my $decision_id = $k;
+			$entry_type = '';
+			my $content = $data->{content}->{$k};
+			$decision_number = $content->{decision}->{number} if defined( $content->{decision}->{number} );
+			$decision_org = $content->{decision}->{org} if defined( $content->{decision}->{org} );
+			$decision_date = $content->{decision}->{date} if defined( $content->{decision}->{org} );
+			$entry_type = $content->{entryType} if defined( $content->{entryType} );
+			$include_time = $content->{includeTime} if defined( $content->{includeTime} );
 	
-	my %item = (
-	    'entry_type'	=> $entry_type,
-	    'decision_num'	=> $decision_number,
-	    'decision_id'	=> $decision_id,
-	    'decision_date'	=> $decision_date,
-	    'decision_org'	=> $decision_org,
-	    'include_time'	=> $include_time
-	);
-	my @domains = ();
-	my @urls = ();
-	my @ips = ();
-	my @subnets = ();
-	    
-	    # Domains
-	    if( defined( $content->{domain} ) ) {
-		if(ref($content->{domain}) eq 'ARRAY') {
-		    foreach( @{$content->{domain}} ) {
-			push @domains, $_;
-		    }
-		} else {
-		    push @domains, $content->{domain};
-		}
-	    }
-	    $item{'domains'} = \@domains;
-	    
-	    # URLs
-	    if( defined( $content->{url} ) ) {
-		if( ref($content->{url}) eq 'ARRAY' ) {
-		    foreach( @{$content->{url}} ) {
-			push @urls, $_;
-		    }
-		} else {
-		    push @urls, $content->{url};
-		}
-	    }
-	    $item{'urls'} = \@urls;
-	    
-	    # IPs
-	    if( defined( $content->{ip} ) ) {
-		if( ref($content->{ip}) eq 'ARRAY' ) {
-		    foreach( @{$content->{ip}} ) {
-			push @ips, $_;
-		    }
-		} else {
-		    push @ips, $content->{ip};
-		}
-	    }
-	    $item{'ips'} = \@ips;
+			my %item = (
+				'entry_type'	=> $entry_type,
+				'decision_num'	=> $decision_number,
+				'decision_id'	=> $decision_id,
+				'decision_date'	=> $decision_date,
+				'decision_org'	=> $decision_org,
+				'include_time'	=> $include_time
+			);
+
+			my @domains = ();
+			my @urls = ();
+			my @ips = ();
+			my @subnets = ();
+			my $blockType=defined($content->{blockType}) ? $content->{blockType} : "default";
+
+			if($blockType ne "domain" && $blockType ne "default")
+			{
+				$logger->error("Not recognized blockType: $blockType");
+			}
+			#пишем домены, если только стоит тип блокировки по домену
+			# Domains
+		#	if($blockType eq "domain")
+		#	{
+				if( defined( $content->{domain} ) )
+				{
+					if(ref($content->{domain}) eq 'ARRAY')
+					{
+						foreach( @{$content->{domain}} )
+						{
+							push @domains, $_;
+					}
+				} else {
+					push @domains, $content->{domain};
+				}
+				}
+				$item{'domains'} = \@domains;
+		#	}
+
+			# URLs
+			if( defined( $content->{url} ) )
+			{
+				if( ref($content->{url}) eq 'ARRAY' )
+				{
+					foreach( @{$content->{url}} )
+					{
+						push @urls, $_;
+					}
+				} else {
+					push @urls, $content->{url};
+				}
+			}
+			$item{'urls'} = \@urls;
+		
+			# IPs
+			if( defined( $content->{ip} ) )
+			{
+				if( ref($content->{ip}) eq 'ARRAY' )
+				{
+					foreach( @{$content->{ip}} )
+					{
+						push @ips, $_;
+					}
+				} else {
+					push @ips, $content->{ip};
+				}
+			}
+			$item{'ips'} = \@ips;
+		
+			# Subnets
+			if( defined( $content->{ipSubnet} ) )
+			{
+				if( ref($content->{ipSubnet}) eq 'ARRAY' )
+				{
+					foreach( @{$content->{ipSubnet}} )
+					{
+						push @subnets, $_;
+					}
+				} else {
+					push @subnets, $content->{ipSubnet};
+				}
+			}
+			$item{'subnets'} = \@subnets;
 	
-	    # Subnets
-	    if( defined( $content->{ipSubnet} ) ) {
-		if( ref($content->{ipSubnet}) eq 'ARRAY' ) {
-		    foreach( @{$content->{ipSubnet}} ) {
-			push @subnets, $_;
-		    }
-		} else {
-		    push @subnets, $content->{ipSubnet};
-		}
-	    }
-	    $item{'subnets'} = \@subnets;
+#			$logger->debug( " -- Decision (id ".$decision_id."): ".$decision_number.", from ".$decision_date.", org: ".$decision_org." \n" );
 	
-#	    debug( " -- Decision (id ".$decision_id."): ".$decision_number.", from ".$decision_date.", org: ".$decision_org." \n" );
-	
-#	    print Dumper( \%item );
-	$NEW{$decision_id} = \%item;
-	};
-	print "Eval! ".$@ if $@;
-    }
+			$NEW{$decision_id} = \%item;
+		};
+		$logger->error("Eval! ".$@) if $@;
+	}
 	
 	# Dump parsed.
 	# Get old data from DB
 	getOld();
-	
-	processNew();
+
+	my $resolver = AnyEvent::DNS->new(timeout => [$dns_timeout], max_outstanding => 50, server => \@resolvers_new); # создаём резолвер с нужными параметрами
+
+	my $cv = AnyEvent->condvar;
+
+	processNew($resolver,$cv);
+
+	if($resolve == 1)
+	{
+		$logger->debug("Wait while all resolvers finished");
+
+		$cv->recv;
+	}
+
 	clearOld();
 	processMail();
 	
@@ -502,114 +582,96 @@ sub parseDump
 	set('lastDumpDate', time() );
 };
 
-
 # Cleanup old entries
 sub clearOld {
 	foreach my $domain ( keys %OLD_TRUE_DOMAINS ) {
-		if( !defined($NEW_DOMAINS{$domain}) ) {
 			delDomain( $OLD_TRUE_DOMAINS{$domain}[0], $OLD_TRUE_DOMAINS{$domain}[1] );
-#			debug("Deleting domain id ".$OLD_TRUE_DOMAINS{$domain}[0]." ( ".$OLD_TRUE_DOMAINS{$domain}[1]." )");
-		}
+			$deleted_old_domains++;
+#			$logger->debug("Deleting domain id ".$OLD_TRUE_DOMAINS{$domain}[0]." ( ".$OLD_TRUE_DOMAINS{$domain}[1]." )");
 	}
 	foreach my $url ( keys %OLD_TRUE_URLS ) {
-		if( !defined($NEW_URLS{$url}) ) {
+			$deleted_old_urls++;
 			delUrl( $OLD_TRUE_URLS{$url}[0], $OLD_TRUE_URLS{$url}[1] );
-#			debug("Deleting url id ".$OLD_TRUE_URLS{$url}[0]." (".$OLD_TRUE_URLS{$url}[1].")");
-		}
+#			$logger->debug("Deleting url id ".$OLD_TRUE_URLS{$url}[0]." (".$OLD_TRUE_URLS{$url}[1].")");
 	}
-	foreach my $ip ( keys %OLD_TRUE_IPS ) {
-		if( !defined($NEW_IPS{$ip}) ) {
+	foreach my $ip ( keys %OLD_TRUE_IPS )
+	{
+			$deleted_old_ips++;
 			delIp( $OLD_TRUE_IPS{$ip}[0], $OLD_TRUE_IPS{$ip}[1] );
-#			debug("Deleting IP id ".$OLD_TRUE_IPS{$ip}[0]." (".$OLD_TRUE_IPS{$ip}[1].")");
-		}
 	}
+
+	foreach my $ip ( keys %OLD_TRUE_ONLY_IPS ) {
+			$deleted_old_only_ips++;
+			delIpOnly( $OLD_TRUE_ONLY_IPS{$ip}[0], $OLD_TRUE_ONLY_IPS{$ip}[1] );
+	}
+
 	foreach my $net ( keys %OLD_TRUE_SUBNETS ) {
-		if( !defined($NEW_SUBNETS{$net}) ) {
+			$deleted_old_subnets++;
 			delSubnet( $OLD_TRUE_SUBNETS{$net}[0], $OLD_TRUE_SUBNETS{$net}[1] );
-#			debug("Deleting subnet id ".$OLD_TRUE_SUBNETS{$net}[0]." (".$OLD_TRUE_SUBNETS{$net}[1].")");
-		}
 	}
 	foreach my $item ( keys %OLD_TRUE ) {
-		if( !defined($NEW{$item}) ) {
+			$deleted_old_records++;
 			#print $OLD_TRUE{$item}->{id};
-#			debug("Deleting decision record of id ".$OLD_TRUE{$item}->{id});
-			delRecord($OLD_TRUE{$item}->{id} );
-		}
+#			$logger->debug("Deleting decision record of id ".$OLD_TRUE{$item}->{id});
 	}
 };
 
 sub processNew {
+	my $resolver = shift;
+	my $cv = shift;
 	my $sth;
     eval {
 	# Content items:
 	foreach my $d_id ( keys %NEW ) {
 		
 		my $record_id = 0;
-		if( !defined( $OLD{$d_id} ) ) {
-		    # New record
-		    $sth = $DBH->prepare("INSERT INTO zap2_records(decision_id,decision_date,decision_num,decision_org,include_time,entry_type) VALUES(?,?,?,?,?,?)");
-		    $sth->bind_param(1, $d_id );
-		    $sth->bind_param(2, $NEW{$d_id}->{decision_date} );
-		    $sth->bind_param(3, $NEW{$d_id}->{decision_num} );
-		    $sth->bind_param(4, $NEW{$d_id}->{decision_org} );
-		    $sth->bind_param(5, $NEW{$d_id}->{include_time} );
-		    $sth->bind_param(6, $NEW{$d_id}->{entry_type} );
-		    $sth->execute;
-		    $record_id = $sth->{mysql_insertid};
-		    $OLD{$d_id} = $record_id;
-		    $MAIL_ADDED .= "Added new content: id ".$record_id."\n";
-		    debug("Added new content: id ".$record_id);
+		if( !defined( $OLD{$d_id} ) )
+		{
+			# New record
+			$sth = $DBH->prepare("INSERT INTO zap2_records(decision_id,decision_date,decision_num,decision_org,include_time,entry_type) VALUES(?,?,?,?,?,?)");
+			$sth->bind_param(1, $d_id );
+			$sth->bind_param(2, $NEW{$d_id}->{decision_date} );
+			$sth->bind_param(3, $NEW{$d_id}->{decision_num} );
+			$sth->bind_param(4, $NEW{$d_id}->{decision_org} );
+			$sth->bind_param(5, $NEW{$d_id}->{include_time} );
+			$sth->bind_param(6, $NEW{$d_id}->{entry_type} );
+			$sth->execute;
+			$record_id = $sth->{mysql_insertid};
+			$OLD{$d_id} = $record_id;
+			$MAIL_ADDED .= "Added new content: id ".$record_id."\n";
+			$logger->debug("Added new content: id ".$record_id);
+			$added_records++;
 		} else {
-		    $record_id = $OLD{$d_id}->{id};
+			delete $OLD_TRUE{$d_id};
+			$record_id = $OLD{$d_id}->{id};
 		}
-		$NEW_RECORDS{$d_id} = 1;
-		
-		# Domain items:
-		if( ref($NEW{$d_id}->{domains}) eq 'ARRAY' ) {
-		    foreach( @{$NEW{$d_id}->{domains}} ) {
-			my $domain = $_;
-			
-			# Check for excludes
-			if( defined( $EX_DOMAINS{$domain} ) ) {
-#				print "EXCLUDE DOMAIN: ".$domain."\n";
-				$MAIL_EXCLUDES .= "Excluding domain: ".$domain."\n";
-				debug("Excluding domain: ".$domain);
-				next;
-			}
-			
-			Resolve( $domain, $record_id );
-			
-			if( !defined( $OLD_DOMAINS{md5_hex(encode_utf8($domain))} ) ) {
-#				print "New domain: ".$domain."\n";
-				$sth = $DBH->prepare("INSERT INTO zap2_domains(record_id, domain) VALUES(?,?)");
-				$sth->bind_param(1, $record_id);
-				$sth->bind_param(2, $domain);
-				$sth->execute;
-				$OLD_DOMAINS{md5_hex(encode_utf8($domain))} = 1;
-				$MAIL_ADDED .= "Added new domain: ".encode_utf8($domain)."\n";
-				debug("Added new domain: ".encode_utf8($domain));
-			}
-			$NEW_DOMAINS{md5_hex(encode_utf8($domain))} = encode_utf8($domain);
-		    }
-		}
-		
+
 		# URLs
-		if( ref($NEW{$d_id}->{urls}) eq 'ARRAY' ) {
-			foreach( @{$NEW{$d_id}->{urls}} ) {
-				my $url = $_;
-				
+		my $processed_urls=0;
+		if( ref($NEW{$d_id}->{urls}) eq 'ARRAY' )
+		{
+			foreach my $url ( @{$NEW{$d_id}->{urls}} )
+			{
+				$processed_urls++;
 				# Check for ex. domain
-				my @res = ( $url =~ m!^(?:http://|https://)?([^(/|\?)]+)!i );
-				my $url_domain = $res[0];
-				
-				Resolve( $url_domain, $record_id );
-				
-				if( defined( $EX_DOMAINS{$url_domain} ) ) {
-#					binmode(STDOUT, ':utf8');
-#					print "EXCLUDE DOMAIN ".$url_domain." (URL ".$url.")\n";
-					$MAIL_EXCLUDES .= "Excluding URL (caused by excluded domain ".$url_domain."): ".encode_utf8($url)."\n";
-					next;
+				my $uri = URI->new($url);
+				my $scheme = $uri->scheme();
+				if($scheme ne "http" && $scheme ne "https")
+				{
+					$logger->error("Unsupported scheme in url: $url for resolving.");
+				} else {
+					my $url_domain = $uri->host();
+					#my @res = ( $url =~ m!^(?:http://|https://)?([^(/|\?)]+)!i );
+					#my $url_domain = $res[0];
+					if( defined( $EX_DOMAINS{$url_domain} ) ) {
+	#					binmode(STDOUT, ':utf8');
+	#					print "EXCLUDE DOMAIN ".$url_domain." (URL ".$url.")\n";
+						$MAIL_EXCLUDES .= "Excluding URL (caused by excluded domain ".$url_domain."): ".$url."\n";
+						next;
+					}
+					Resolve( $url_domain, $record_id, $resolver, $cv);
 				}
+				
 				
 				if( !defined( $OLD_URLS{md5_hex(encode_utf8($url))} ) ) {
 #				    binmode(STDOUT, ':utf8');
@@ -620,81 +682,83 @@ sub processNew {
 				    $sth->bind_param(2, $url);
 				    $sth->execute;
 				    $OLD_URLS{md5_hex(encode_utf8($url))} = 1;
-				    $MAIL_ADDED .= "Added new URL: ".encode_utf8($url)."\n";
-				    debug("Added new URL: ".encode_utf8($url));
+				    $MAIL_ADDED .= "Added new URL: ".$url."\n";
+				    $logger->debug("Added new URL: ".$url);
+				    $added_urls++;
+				} else {
+					# delete from old_true_urls
+					delete $OLD_TRUE_URLS{md5_hex(encode_utf8($url))};
 				}
-				$NEW_URLS{md5_hex(encode_utf8($url))} = encode_utf8($url);
 			}
 		}
+		my $need_to_block_domain=0;
+		if(!$processed_urls)
+		{
+			$logger->debug("Item $d_id hasn't defined URL, must block by DOMAIN");
+			$need_to_block_domain=1;
+		}
 		
-		# Subnets
-		if( ref($NEW{$d_id}->{subnets}) eq 'ARRAY' ) {
-			foreach( @{$NEW{$d_id}->{subnets}} ) {
-				my $subnet = $_;
-				
-				
-				my $exclude = 0;
-				# Check for excludes. Ips:
-				for my $ip (keys %EX_IPS) {
-#					print $ip."\n";
-					my $ipadr = NetAddr::IP->new( $ip );
-					my $net = NetAddr::IP->new( $subnet );
-					if( $ipadr && $net ) {
-						if( $ipadr->within($net) ) {
-#							print "Exclude subnet ".$subnet.": contains excluded IP ".$ip."\n";
-							$MAIL_EXCLUDES .= "Excluding subnet ".$subnet.": contains excluded ip ".$ip."\n";
-							debug("Excluding subnet ".$subnet);
-							$exclude = 1;
-						}
-					}
-				}
-				# And nets:
-				for my $net (keys %EX_SUBNETS) {
-					my $net1 = NetAddr::IP->new( $net );
-					my $net2 = NetAddr::IP->new( $net );
-					if( $net1 && $net2 ) {
-						if( $net1->within( $net2 ) || $net2->within( $net1 ) ) {
-#							print "Exclude subnet ".$subnet.": overlaps with excluded net ".$net."\n";
-							$MAIL_EXCLUDES .= "Excluding subnet ".$subnet.": overlaps with excluded net ".$net."\n";
-							$exclude = 1;
-							debug("Excluding subnet ".$subnet);
-						}
-					}
-				}
-				
-				if( $exclude == 1 ) {
+		my $processed_domains=0;
+		# Domain items:
+		if( ref($NEW{$d_id}->{domains}) eq 'ARRAY' && $need_to_block_domain)
+		{
+			foreach my $domain( @{$NEW{$d_id}->{domains}} )
+			{
+				# Check for excludes
+				if( defined( $EX_DOMAINS{$domain} ) ) {
+	#				print "EXCLUDE DOMAIN: ".$domain."\n";
+					$MAIL_EXCLUDES .= "Excluding domain: ".$domain."\n";
+					$logger->debug("Excluding domain: ".$domain);
 					next;
 				}
-				
-				if( !defined( $OLD_SUBNETS{$subnet} ) ) {
-#				    print "New subnet: ".$subnet."\n";
-				    $sth = $DBH->prepare("INSERT INTO zap2_subnets(record_id, subnet) VALUES(?,?)");
-				    $sth->bind_param(1, $record_id);
-				    $sth->bind_param(2, $subnet);
-				    $sth->execute;
-				    $OLD_SUBNETS{$subnet} = 1;
-				    $MAIL_ADDED .= "Added new subnet: ".$subnet."\n";
-				    debug("Added new subnet: ".$subnet);
-
-					# Check, if there no any othere parameters in this content
-					if(
-						( !defined($NEW{$d_id}->{domains}) || ref($NEW{$d_id}->{domains}) ne 'ARRAY' || scalar(@{$NEW{$d_id}->{domains}}) == 0 )
-						&&
-						( !defined($NEW{$d_id}->{urls}) || ref($NEW{$d_id}->{urls}) ne 'ARRAY' || scalar(@{$NEW{$d_id}->{urls}}) == 0 )
-					) {
-						$MAIL_ALONE .= "Alert! Subnet ".$subnet." added without any domain/url!\n";
-					}
-
+				$processed_domains++;
+				Resolve( $domain, $record_id, $resolver, $cv );
+				if( !defined( $OLD_DOMAINS{md5_hex(encode_utf8($domain))} ) )
+				{
+#					print "New domain: ".$domain."\n";
+					$sth = $DBH->prepare("INSERT INTO zap2_domains(record_id, domain) VALUES(?,?)");
+					$sth->bind_param(1, $record_id);
+					$sth->bind_param(2, $domain);
+					$sth->execute;
+					$OLD_DOMAINS{md5_hex(encode_utf8($domain))} = 1;
+					$MAIL_ADDED .= "Added new domain: ".$domain."\n";
+					$logger->debug("Added new domain: ".$domain);
+					$added_domains++;
+				} else {
+					delete $OLD_TRUE_DOMAINS{md5_hex(encode_utf8($domain))};
 				}
-				$NEW_SUBNETS{$subnet} = 1;
 			}
 		}
-		
+		my $need_to_block_ip=0;
+		if(!$processed_urls && !$processed_domains)
+		{
+			$logger->debug("Item $d_id hasn't url and domain, need to block by IP");
+			$need_to_block_ip=1;
+		}
+
 		# IPS
-		if( ref($NEW{$d_id}->{ips}) eq 'ARRAY' ) {
-			foreach( @{$NEW{$d_id}->{ips}} ) {
-				my $ip = $_;
-				
+		if( ref($NEW{$d_id}->{ips}) eq 'ARRAY' )
+		{
+			foreach my $ip ( @{$NEW{$d_id}->{ips}} )
+			{
+				if($need_to_block_ip)
+				{
+					if( !defined( $OLD_ONLY_IPS{$ip} ) )
+					{
+						my $ipa = new Net::IP($ip);
+						my $ip_packed=pack("B*",$ipa->binip());
+						$sth = $DBH->prepare("INSERT INTO zap2_only_ips(record_id, ip, resolved) VALUES(?,?,0)");
+						$sth->bind_param(1, $record_id);
+						$sth->bind_param(2, $ip_packed);
+						$sth->execute;
+						$OLD_ONLY_IPS{$ipa->ip()} = 1;
+						$MAIL_ADDED_IPS .= "Added new ONLY IP: ".$ipa->ip()."\n";
+						$logger->debug("New ONLY ip: ".$ipa->ip());
+					} else {
+						delete $OLD_ONLY_IPS{$ip};
+					}
+					next;
+				}
 				my $exclude = 0;
 				# Check excluded nets
 				for my $subnet (keys %EX_SUBNETS) {
@@ -704,52 +768,133 @@ sub processNew {
 						if( $ipadr->within($net) ) {
 #							print "Excluding ip ".$ip.": overlaps with excluded subnet ".$subnet."\n";
 							$MAIL_EXCLUDES .= "Excluding ip ".$ip.": overlaps with excluded subnet ".$subnet."\n";
-							debug("Excluding ip ".$ip);
+							$logger->debug("Excluding ip ".$ip);
+							$exclude = 1;
+							last;
+						}
+					}
+				}
+				next if( $exclude == 1 );
+				
+				# Check for ex. ip
+				if( defined($EX_IPS{$ip}) )
+				{
+#					print "Excluding ip ".$ip.": match excluded ip in DB.\n";
+					$MAIL_EXCLUDES .= "Excluding ip ".$ip.": match excluded ip in DB.\n";
+					$logger->debug("Excluding ip ".$ip);
+					next;
+				}
+				
+				if( !defined( $OLD_IPS{$ip} ) )
+				{
+#					print "New ip: ".$ip."\n";
+					my $ipa = new Net::IP($ip);
+					my $ip_packed=pack("B*",$ipa->binip());
+					$sth = $DBH->prepare("INSERT INTO zap2_ips(record_id, ip, resolved) VALUES(?,?,0)");
+					$sth->bind_param(1, $record_id);
+					$sth->bind_param(2, $ip_packed);
+					$sth->execute;
+					$OLD_IPS{$ipa->ip()} = 1;
+					$MAIL_ADDED_IPS .= "Added new IP: ".$ipa->ip()."\n";
+					$logger->debug("New ip: ".$ipa->ip());
+					if($ipa->version() == 4)
+					{
+						$added_ipv4_ips++;
+					} else {
+						$added_ipv6_ips++;
+					}
+				} else {
+					delete $OLD_TRUE_IPS{$ip};
+				}
+			}
+		}
+
+		# Subnets
+		if( ref($NEW{$d_id}->{subnets}) eq 'ARRAY' )
+		{
+			foreach my $subnet ( @{$NEW{$d_id}->{subnets}} )
+			{
+				my $exclude = 0;
+				# Check for excludes. Ips:
+				for my $ip (keys %EX_IPS)
+				{
+#					print $ip."\n";
+					my $ipadr = NetAddr::IP->new( $ip );
+					my $net = NetAddr::IP->new( $subnet );
+					if( $ipadr && $net ) {
+						if( $ipadr->within($net) ) {
+#							print "Exclude subnet ".$subnet.": contains excluded IP ".$ip."\n";
+							$MAIL_EXCLUDES .= "Excluding subnet ".$subnet.": contains excluded ip ".$ip."\n";
+							$logger->debug("Excluding subnet ".$subnet);
 							$exclude = 1;
 						}
 					}
 				}
+				# And nets:
+				for my $net (keys %EX_SUBNETS)
+				{
+					my $net1 = NetAddr::IP->new( $net );
+					my $net2 = NetAddr::IP->new( $net );
+					if( $net1 && $net2 ) {
+						if( $net1->within( $net2 ) || $net2->within( $net1 ) ) {
+#							print "Exclude subnet ".$subnet.": overlaps with excluded net ".$net."\n";
+							$MAIL_EXCLUDES .= "Excluding subnet ".$subnet.": overlaps with excluded net ".$net."\n";
+							$exclude = 1;
+							$logger->debug("Excluding subnet ".$subnet);
+							last;
+						}
+					}
+				}
+				
 				if( $exclude == 1 ) {
 					next;
 				}
 				
-				# Check for ex. ip
-				if( defined($EX_IPS{$ip}) ) {
-#					print "Excluding ip ".$ip.": match excluded ip in DB.\n";
-					$MAIL_EXCLUDES .= "Excluding ip ".$ip.": match excluded ip in DB.\n";
-					debug("Excluding ip ".$ip);
-					next;
-				}
-				
-				if( !defined( $OLD_IPS{$ip} ) ) {
-#					print "New ip: ".$ip."\n";
-					$sth = $DBH->prepare("INSERT INTO zap2_ips(record_id, ip, resolved) VALUES(?,inet_aton(?),0)");
+				if( !defined( $OLD_SUBNETS{$subnet} ) )
+				{
+#					print "New subnet: ".$subnet."\n";
+					$sth = $DBH->prepare("INSERT INTO zap2_subnets(record_id, subnet) VALUES(?,?)");
 					$sth->bind_param(1, $record_id);
-					$sth->bind_param(2, $ip);
+					$sth->bind_param(2, $subnet);
 					$sth->execute;
-					$OLD_IPS{$ip} = 1;
-					$MAIL_ADDED_IPS .= "Added new IP: ".$ip."\n";
-					debug("New ip: ".$ip);
+					$OLD_SUBNETS{$subnet} = 1;
+					$MAIL_ADDED .= "Added new subnet: ".$subnet."\n";
+					$logger->debug("Added new subnet: ".$subnet);
+
+					# Check, if there no any othere parameters in this content
+					if(
+						( !defined($NEW{$d_id}->{domains}) || ref($NEW{$d_id}->{domains}) ne 'ARRAY' || scalar(@{$NEW{$d_id}->{domains}}) == 0 )
+						&&
+						( !defined($NEW{$d_id}->{urls}) || ref($NEW{$d_id}->{urls}) ne 'ARRAY' || scalar(@{$NEW{$d_id}->{urls}}) == 0 )
+					) {
+						$MAIL_ALONE .= "Alert! Subnet ".$subnet." added without any domain/url!\n";
+					}
+					$added_subnets++;
+				} else {
+					delete $OLD_TRUE_SUBNETS{$subnet};
 				}
-				$NEW_IPS{$ip} = 1;
 			}
 		}
+		
 	}
     };
-	print "Eval: ".$@ if $@;
+	$logger->error("Eval: ".$@) if $@;
 };
 
 sub getOld {
 	%OLD = ();
 	%OLD_IPS = ();
+	%OLD_ONLY_IPS = ();
 	%OLD_DOMAINS = ();
 	%OLD_SUBNETS = ();
 	%OLD_URLS = ();
 	%OLD_TRUE = ();
 	%OLD_TRUE_IPS = ();
+	%OLD_TRUE_ONLY_IPS = ();
 	%OLD_TRUE_DOMAINS = ();
 	%OLD_TRUE_SUBNETS = ();
 	%OLD_TRUE_URLS = ();
+
 	# Contents
 	my $sth = $DBH->prepare("SELECT id,date_add,decision_id,decision_date,decision_num,decision_org,include_time FROM zap2_records ORDER BY date_add");
 	$sth->execute or die DBI->errstr;
@@ -771,16 +916,16 @@ sub getOld {
 	$sth = $DBH->prepare("SELECT record_id, domain, id FROM zap2_domains ORDER BY date_add");
 	$sth->execute or die DBI->errstr;
 	while( my $ref = $sth->fetchrow_arrayref ) {
-		$OLD_DOMAINS{md5_hex($$ref[1])} = $$ref[0];
-		@{$OLD_TRUE_DOMAINS{md5_hex($$ref[1])}} = ( $$ref[2], $$ref[1], $$ref[0] );
+		$OLD_DOMAINS{md5_hex(encode_utf8($$ref[1]))} = $$ref[0];
+		@{$OLD_TRUE_DOMAINS{md5_hex(encode_utf8($$ref[1]))}} = ( $$ref[2], $$ref[1], $$ref[0] );
 	}
 	
 	# URLs
 	$sth = $DBH->prepare("SELECT id,record_id,url FROM zap2_urls ORDER BY date_add");
 	$sth->execute or die DBI->errstr;
 	while( my $ref = $sth->fetchrow_arrayref ) {
-		$OLD_URLS{md5_hex($$ref[2])} = $$ref[0];
-		@{$OLD_TRUE_URLS{md5_hex($$ref[2])}} = ( $$ref[0], $$ref[2], $$ref[1] );
+		$OLD_URLS{md5_hex(encode_utf8($$ref[2]))} = $$ref[0];
+		@{$OLD_TRUE_URLS{md5_hex(encode_utf8($$ref[2]))}} = ( $$ref[0], $$ref[2], $$ref[1] );
 	}
 	
 	# Subnets
@@ -792,11 +937,25 @@ sub getOld {
 	}
 	
 	# Ips
-	$sth = $DBH->prepare("SELECT inet_ntoa(ip) AS ip, record_id, id FROM zap2_ips ORDER BY date_add");
+	$sth = $DBH->prepare("SELECT ip, record_id, id, resolved FROM zap2_ips ORDER BY date_add");
 	$sth->execute or die DBI->errstr;
-	while( my $ref = $sth->fetchrow_arrayref ) {
-		$OLD_IPS{$$ref[0]} = $$ref[1];
-		@{$OLD_TRUE_IPS{$$ref[0]}} = ( $$ref[2], $$ref[0] );
+	while( my $ref = $sth->fetchrow_arrayref )
+	{
+		my $old_ip=get_ip($$ref[0]);
+		$OLD_IPS{$old_ip} = $$ref[1];
+		next if($keep_resolved == 1 && $$ref[3] eq "1"); # skeep to delete resolved ips
+		@{$OLD_TRUE_IPS{$old_ip}} = ( $$ref[2], $old_ip );
+	}
+
+	# ONLY ips
+	$sth = $DBH->prepare("SELECT ip, record_id, id FROM zap2_only_ips ORDER BY date_add");
+	# todo добавить поддержку ipv6
+	$sth->execute or die DBI->errstr;
+	while( my $ref = $sth->fetchrow_arrayref )
+	{
+		my $old_ip=get_ip($$ref[0]);
+		$OLD_ONLY_IPS{$old_ip} = $$ref[1];
+		@{$OLD_TRUE_ONLY_IPS{$old_ip}} = ( $$ref[2], $old_ip );
 	}
 	
 	# Excludes
@@ -817,55 +976,27 @@ sub getOld {
 	}
 };
 
-sub Resolve {
+sub Resolve
+{
 	my $domain = shift;
 	my $record_id = shift;
-	
+	my $resolvera = shift || undef;
+	my $cv=shift || undef;
+
 	if( $resolve != 1 ) {
 		return;
 	}
-	
-	my @adrs = ();
-	eval {
-		@adrs = nslookup(domain => $domain, server => @resolvers, timeout => 4 );
-	};
-	foreach( @adrs ) {
-		my $ip = $_;
-		if( defined( $OLD_IPS{$ip} ) ) {
-			next;
-		}
-		my $exclude = 0;
-		for my $subnet (keys %EX_SUBNETS) {
-			my $ipadr = NetAddr::IP->new( $ip );
-			my $net = NetAddr::IP->new( $subnet );
-			if( $ipadr && $net ) {
-				if( $ipadr->within($net) ) {
-					print "Excluding ip ".$ip.": overlaps with excluded subnet ".$subnet."\n";
-					debug("Excluding ip ".$ip);
-					$MAIL_EXCLUDES .= "Excluding new ip: ".$ip."\n";
-					$exclude = 1;
-				}
-			}
-		}
-		if( defined($EX_IPS{$ip}) ) {
-			debug("Excluding ip ".$ip);
-			$exclude = 1;
-		}
-		
-		if( $exclude == 1 ) {
-			next;
-		}
-		
-		# Not in old ips, not in excludes...
-		my $sth = $DBH->prepare("INSERT INTO zap2_ips(record_id, ip, resolved) VALUES(?,inet_aton(?),1)");
-		$sth->bind_param(1, $record_id);
-		$sth->bind_param(2, $ip);
-		$sth->execute;
-		debug("New resolved ip: ".$ip." for domain ".$domain);
-		$MAIL_ADDED_IPS .= "New resolved IP: ".$ip." for domain ".$domain."\n";
-		$OLD_IPS{$ip} = 1;
+
+	if(defined $resolver_cache{md5_hex(encode_utf8($domain))})
+	{
+		$logger->debug("Domain $domain already resolved");
+		return;
 	}
-};
+	my $type="a";
+	$type="*" if($ipv6_nslookup);
+	$resolver_cache{md5_hex(encode_utf8($domain))}=1;
+	resolve_async($cv,$domain,$resolvera,$type,$record_id);
+}
 
 sub Mail {
 	my $text = shift;
@@ -881,20 +1012,20 @@ sub Mail {
 	    eval {
 		my $to = $_;
 		
-		my $smtp = Net::SMTP->new($smtp_host.':'.$smtp_port, Debug => 0) or do { print "Can't connect to SMTP server; $!;"; return; };
+		my $smtp = Net::SMTP->new($smtp_host.':'.$smtp_port, Debug => 0) or do { $logger->error( "Can't connect to SMTP server; $!;"); return; };
 	
 		eval {
 		    require MIME::Base64;
 		    require Authen::SASL;
-		} or do { print "Need MIME::Base64 and Authen::SASL to do smtp auth."; return; };
+		} or do { $logger->error( "Need MIME::Base64 and Authen::SASL to do smtp auth."); return; };
 		
 		
 		if( $smtp_auth eq '1' ) {
 		    if( $smtp_login eq '' || $smtp_password eq '' ) {
-			debug("ERROR! SMTP Auth is enabled, but no login and password defined!");
+			$logger->debug("ERROR! SMTP Auth is enabled, but no login and password defined!");
 			return;
 		    }
-		    $smtp->auth($smtp_login, $smtp_password) or do { print "Can't auth on smtp server; $!"; return; };
+		    $smtp->auth($smtp_login, $smtp_password) or do {$logger->error( "Can't auth on smtp server; $!"); return; };
 		}
 	
 		$smtp->mail( $smtp_from );
@@ -907,11 +1038,12 @@ sub Mail {
 		$smtp->datasend("To: ".$to."\n");
 		$smtp->datasend("Subject: zapret update!");
 		$smtp->datasend("\n");
+		$smtp->datasend("Content-type: text/plain; charset=utf-8\n");
 		$smtp->datasend( $text );
 		$smtp->dataend();
 		$smtp->quit;
 	    };
-	    print $@ if $@;
+	    $logger->error( $@ ) if $@;
 	}
 };
 
@@ -919,7 +1051,7 @@ sub delDomain {
 	my $id = shift;
 	my $domain = shift;
 	
-	debug("Removing domain ".$domain." (id ".$id.")");
+	$logger->debug("Removing domain ".$domain." (id ".$id.")");
 	$MAIL_REMOVED .= "Removed domain ".$domain." (id ".$id.")\n";
 	
 	my $sth = $DBH->prepare("DELETE FROM zap2_domains WHERE id=?");
@@ -931,7 +1063,7 @@ sub delUrl {
 	my $id = shift;
 	my $url = shift;
 
-	debug("Removing URL ".$url." (id ".$id.")");
+	$logger->debug("Removing URL ".$url." (id ".$id.")");
 	$MAIL_REMOVED .= "Removed URL ".$url." (id ".$id.")\n";
 	
 	my $sth = $DBH->prepare("DELETE FROM zap2_urls WHERE id=?");
@@ -942,18 +1074,31 @@ sub delIp {
 	my $id = shift;
 	my $ip = shift;
 	
-	debug("Removing IP ".$ip." (id ".$id.")");
+	$logger->debug("Removing IP ".$ip." (id ".$id.")");
 	$MAIL_REMOVED_IPS .= "Removed IP ".$ip." (id ".$id.")\n";
 	
 	my $sth = $DBH->prepare("DELETE FROM zap2_ips WHERE id=?");
 	$sth->bind_param( 1, $id );
 	$sth->execute;
 };
+
+sub delIpOnly {
+	my $id = shift;
+	my $ip = shift;
+	
+	$logger->debug("Removing ONLY IP ".$ip." (id ".$id.")");
+	$MAIL_REMOVED_IPS .= "Removed ONLY IP ".$ip." (id ".$id.")\n";
+	
+	my $sth = $DBH->prepare("DELETE FROM zap2_only_ips WHERE id=?");
+	$sth->bind_param( 1, $id );
+	$sth->execute;
+};
+
 sub delSubnet {
 	my $id = shift;
 	my $subnet = shift;
 
-	debug("Removing subnet ".$subnet." (id ".$id.")");
+	$logger->debug("Removing subnet ".$subnet." (id ".$id.")");
 	$MAIL_REMOVED .= "Removed subnet ".$subnet." (id ".$id.")\n";
 	
 	my $sth = $DBH->prepare("DELETE FROM zap2_subnets WHERE id=?");
@@ -963,7 +1108,7 @@ sub delSubnet {
 sub delRecord {
 	my $id = shift;
 	
-#	debug("Removing record ".$id);
+#	$logger->debug("Removing record ".$id);
 	$MAIL_REMOVED .= "Removed record ".$id."\n";
 	
 	my $sth = $DBH->prepare("DELETE FROM zap2_records WHERE id=?");
@@ -1005,4 +1150,91 @@ sub processMail {
 	}
 	
 };
+
+sub get_ip
+{
+	my $ip_address=shift;
+	my $d_size=length($ip_address);
+	my $result;
+	if($d_size == 4)
+	{
+		$result=ip_bintoip(unpack("B*",$ip_address),4);
+	} else {
+		$result=ip_bintoip(unpack("B*",$ip_address),6);
+	}
+	return $result;
+}
+
+sub resolve_async
+{
+	my $cv=shift;
+	my $host=shift;
+	my $resolver=shift;
+	my $type=shift;
+	my $record_id=shift;
+	if($host =~ m/([А-Яа-я]+)/gi )
+	{
+		$host=puny_enc($host);
+	}
+	$cv->begin;
+	$resolver->resolve($host, $type, accept => ["a", "aaaa"], sub {
+		$resolved_domains++;
+		for my $record (@_) {
+			my $ipa = new Net::IP($record->[3]);
+			if(!defined($ipa))
+			{
+				$logger->error( "Invalid ip address ".$record->[3]." for domain $host");
+				next;
+			}
+			my $ip=$ipa->ip();
+			if( defined( $OLD_IPS{$ip} ) )
+			{
+				# delete from old, because we have it.
+				delete $OLD_TRUE_IPS{$ip} if(defined $OLD_TRUE_IPS{$ip});
+				next;
+			}
+			my $exclude = 0;
+			for my $subnet (keys %EX_SUBNETS)
+			{
+				my $ipadr = NetAddr::IP->new( $ip );
+				my $net = NetAddr::IP->new( $subnet );
+				if( $ipadr && $net ) {
+					if( $ipadr->within($net) ) {
+						#print "Excluding ip ".$ip.": overlaps with excluded subnet ".$subnet."\n";
+						$logger->debug("Excluding ip ".$ip);
+						$MAIL_EXCLUDES .= "Excluding new ip: ".$ip."\n";
+						$exclude = 1;
+						last;
+					}
+				}
+			}
+			if( defined($EX_IPS{$ip}) )
+			{
+				$logger->debug("Excluding ip ".$ip);
+				$exclude = 1;
+			}
+		
+			if( $exclude == 1 ) {
+				next;
+			}
+			if($ipa->version() == 4)
+			{
+				$added_ipv4_ips++;
+			} else {
+				$added_ipv6_ips++;
+			}
+			my $ip_packed=pack("B*",$ipa->binip());
+			# Not in old ips, not in excludes...
+			my $sth = $DBH->prepare("INSERT INTO zap2_ips(record_id, ip, resolved, domain) VALUES(?,?,1,?)");
+			$sth->bind_param(1, $record_id);
+			$sth->bind_param(2, $ip_packed);
+			$sth->bind_param(3, $host);
+			$sth->execute;
+			$logger->debug("New resolved ip: ".$ipa->ip()." for domain ".$host);
+			$MAIL_ADDED_IPS .= "New resolved IP: ".$ipa->ip()." for domain ".$host."\n";
+			$OLD_IPS{$ipa->ip()} = 1;
+		}
+		$cv->end;
+	});
+}
 
