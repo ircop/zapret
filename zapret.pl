@@ -1180,7 +1180,8 @@ sub resolve_async
 	$resolver->resolve($host, $type, accept => ["a", "aaaa"], sub {
 		$resolved_domains++;
 		for my $record (@_) {
-			my $ipa = new Net::IP($record->[3]);
+			my $nr=scalar(@$record);
+			my $ipa = new Net::IP($record->[$nr-1]);
 			if(!defined($ipa))
 			{
 				$logger->error( "Invalid ip address ".$record->[3]." for domain $host");
