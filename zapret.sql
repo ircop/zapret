@@ -145,6 +145,14 @@ CREATE TABLE `zap2_settings` (
 ) ENGINE=MyISAM DEFAULT CHARSET=utf8;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
+INSERT INTO `zap2_settings` (`param`, `value`) VALUES
+('lastDumpDate', '1406930960'),
+('lastAction', 'getResult'),
+('lastResult', 'got'),
+('lastCode', '25ff77c0d152d7544ba2f72a95cbff50'),
+('lastActionDate', '1406929097'),
+('lastDump', '<?xml version="1.0" encoding="windows-1251"?>\r\n<reg:register updateTime="2014-02-02T12:00:00+04:00" updateTimeUrgently="2014-02-01T11:00:00" xmlns:reg="http://rsoc.ru" xmlns:tns="http://rsoc.ru">\r\n<content id="1101" includeTime="2013-12-01T10:00:05">\r\n        <decision date="2013-12-01" number="9" org="');
+
 --
 -- Table structure for table `zap2_subnets`
 --
