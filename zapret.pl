@@ -1184,7 +1184,7 @@ sub resolve_async
 			my $ipa = new Net::IP($record->[$nr-1]);
 			if(!defined($ipa))
 			{
-				$logger->error( "Invalid ip address ".$record->[3]." for domain $host");
+				$logger->error( "Invalid ip address ".$record->[$nr-1]." for domain $host");
 				next;
 			}
 			my $ip=$ipa->ip();
