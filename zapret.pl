@@ -613,6 +613,7 @@ sub clearOld {
 			$deleted_old_records++;
 			#print $OLD_TRUE{$item}->{id};
 #			$logger->debug("Deleting decision record of id ".$OLD_TRUE{$item}->{id});
+			delRecord($OLD_TRUE{$item}->{id});
 	}
 };
 
