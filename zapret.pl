@@ -1194,6 +1194,11 @@ sub resolve_async
 				delete $OLD_TRUE_IPS{$ip} if(defined $OLD_TRUE_IPS{$ip});
 				next;
 			}
+			if ($ipa->iptype() ne "PUBLIC" && $ipa->iptype() ne "GLOBAL-UNICAST")
+			{
+				$logger->info("Bad ip type: ".$ipa->iptype()." for ip $ip");
+				next;
+			}
 			my $exclude = 0;
 			for my $subnet (keys %EX_SUBNETS)
 			{
