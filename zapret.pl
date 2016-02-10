@@ -24,6 +24,8 @@ use Log::Log4perl;
 use Getopt::Long;
 use URI::UTF8::Punycode;
 
+$XML::Simple::PREFERRED_PARSER = 'XML::Parser';
+
 binmode(STDOUT,':utf8');
 binmode(STDERR,':utf8');
 
@@ -482,28 +484,25 @@ sub parseDump
 			my @subnets = ();
 			my $blockType=defined($content->{blockType}) ? $content->{blockType} : "default";
 
-			if($blockType ne "domain" && $blockType ne "default")
-			{
-				$logger->error("Not recognized blockType: $blockType");
-			}
+#			if($blockType ne "domain" && $blockType ne "default")
+#			{
+#				$logger->error("Not recognized blockType: $blockType");
+#			}
 			#пишем домены, если только стоит тип блокировки по домену
 			# Domains
-		#	if($blockType eq "domain")
-		#	{
-				if( defined( $content->{domain} ) )
+			if( defined( $content->{domain} ) )
+			{
+				if(ref($content->{domain}) eq 'ARRAY')
 				{
-					if(ref($content->{domain}) eq 'ARRAY')
+					foreach( @{$content->{domain}} )
 					{
-						foreach( @{$content->{domain}} )
-						{
-							push @domains, $_;
+						push @domains, $_;
 					}
-				} else {
-					push @domains, $content->{domain};
-				}
-				}
-				$item{'domains'} = \@domains;
-		#	}
+			} else {
+				push @domains, $content->{domain};
+			}
+			}
+			$item{'domains'} = \@domains;
 
 			# URLs
 			if( defined( $content->{url} ) )
@@ -748,7 +747,7 @@ sub processNew {
 					{
 						my $ipa = new Net::IP($ip);
 						my $ip_packed=pack("B*",$ipa->binip());
-						$sth = $DBH->prepare("INSERT INTO zap2_only_ips(record_id, ip, resolved) VALUES(?,?,0)");
+						$sth = $DBH->prepare("INSERT INTO zap2_only_ips(record_id, ip) VALUES(?,?)");
 						$sth->bind_param(1, $record_id);
 						$sth->bind_param(2, $ip_packed);
 						$sth->execute;
@@ -756,7 +755,7 @@ sub processNew {
 						$MAIL_ADDED_IPS .= "Added new ONLY IP: ".$ipa->ip()."\n";
 						$logger->debug("New ONLY ip: ".$ipa->ip());
 					} else {
-						delete $OLD_ONLY_IPS{$ip};
+						delete $OLD_TRUE_ONLY_IPS{$ip};
 					}
 					next;
 				}
