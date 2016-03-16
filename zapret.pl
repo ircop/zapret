@@ -116,10 +116,9 @@ my $mail_alone = $Config->{'MAIL.alone'} || 0;
 
 my $form_request = $Config->{'API.form_request'} || 0;
 
-my $our_blacklist = "";
+my $our_blacklist = $Config->{'PATH.our_blacklist'} || "";
 
 my $ldd_iterations = 0;
-
 
 ######## End config #####
 
@@ -571,6 +570,8 @@ sub parseDump
 
 	processNew($resolver,$cv);
 
+	proceedOurBlacklist($resolver,$cv) if($our_blacklist ne "");
+
 	if($resolve == 1)
 	{
 		$logger->debug("Wait while all resolvers finished");
@@ -893,6 +894,86 @@ sub processNew {
 	$logger->error("Eval: ".$@) if $@;
 }
 
+sub proceedOurBlacklist
+{
+	my $resolver = shift;
+	my $cv = shift;
+	my %OLD_BLACKLIST;
+	my %OLD_BLACKLIST_DEL;
+	my $sth;
+	eval {
+		# filling old records...
+		$sth = $DBH->prepare("SELECT id,decision_num FROM zap2_records WHERE decision_id = 0 ORDER BY date_add");
+		$sth->execute or die DBI->errstr;
+		while( my $ips = $sth->fetchrow_hashref() )
+		{
+			$OLD_BLACKLIST{$ips->{decision_num}}=$ips->{id};
+			$OLD_BLACKLIST_DEL{$ips->{decision_num}}=$ips->{id};
+		}
+
+		my $record_id;
+
+		open (my $fh, $our_blacklist);
+		while (my $url = <$fh>)
+		{
+			chomp $url;
+			my $md_hex=md5_hex(encode_utf8($url));
+			if(defined $OLD_BLACKLIST{$md_hex})
+			{
+				$record_id=$OLD_BLACKLIST{$md_hex};
+				delete $OLD_BLACKLIST_DEL{$md_hex};
+			} else {
+				$sth = $DBH->prepare("INSERT INTO zap2_records(decision_num,decision_org,decision_id) VALUES(?,?,?)");
+				$sth->bind_param(1,$md_hex);
+				$sth->bind_param(2,"our_blacklist");
+				$sth->bind_param(3,0);
+				$sth->execute;
+				$record_id = $sth->{mysql_insertid};
+				$OLD_BLACKLIST{$md_hex}=$record_id;
+				$MAIL_ADDED .= "Added new content from our blacklist: id ".$record_id."\n";
+				$logger->debug("Added new content from our blacklist: id ".$record_id);
+				$added_records++;
+			}
+			my $uri = URI->new($url);
+			my $scheme = $uri->scheme();
+			if($scheme ne "http" && $scheme ne "https")
+			{
+				$logger->error("Unsupported scheme in url: $url for resolving.");
+			} else {
+				my $url_domain = $uri->host();
+				if( defined( $EX_DOMAINS{$url_domain} ) )
+				{
+					$MAIL_EXCLUDES .= "Excluding URL (caused by excluded domain ".$url_domain."): ".$url."\n";
+					next;
+				}
+				Resolve( $url_domain, $record_id, $resolver, $cv);
+			}
+			if( !defined( $OLD_URLS{md5_hex(encode_utf8($url))} ) ) {
+				$sth = $DBH->prepare("INSERT INTO zap2_urls(record_id, url) VALUES(?,?)");
+				$sth->bind_param(1, $record_id);
+				$sth->bind_param(2, $url);
+				$sth->execute;
+				$OLD_URLS{md5_hex(encode_utf8($url))} = 1;
+				$MAIL_ADDED .= "Added new URL: ".$url."\n";
+				$logger->debug("Added new URL: ".$url);
+				$added_urls++;
+			} else {
+				# delete from old_true_urls
+				delete $OLD_TRUE_URLS{md5_hex(encode_utf8($url))};
+			}
+		}
+		close $fh;
+
+		# delete old records..
+		foreach my $key (keys %OLD_BLACKLIST_DEL)
+		{
+			$deleted_old_records++;
+			delRecord($OLD_BLACKLIST_DEL{$key});
+		}
+	};
+	$logger->error("proceedOurBlackkist: ".$@) if $@;
+}
+
 sub getOld {
 	%OLD = ();
 	%OLD_ONLY_IPS = ();
@@ -906,7 +987,7 @@ sub getOld {
 	%OLD_TRUE_URLS = ();
 
 	# Contents
-	my $sth = $DBH->prepare("SELECT id,date_add,decision_id,decision_date,decision_num,decision_org,include_time FROM zap2_records ORDER BY date_add");
+	my $sth = $DBH->prepare("SELECT id,date_add,decision_id,decision_date,decision_num,decision_org,include_time FROM zap2_records WHERE decision_id > 0 ORDER BY date_add");
 	$sth->execute or die DBI->errstr;
 	while( my $ref = $sth->fetchrow_arrayref ) {
 		my %item = (
