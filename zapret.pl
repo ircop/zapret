@@ -116,6 +116,8 @@ my $mail_alone = $Config->{'MAIL.alone'} || 0;
 
 my $form_request = $Config->{'API.form_request'} || 0;
 
+my $our_blacklist = "";
+
 my $ldd_iterations = 0;
 
 
@@ -128,13 +130,11 @@ getParams();
 
 my %NEW = ();
 my %OLD = ();
-my %OLD_IPS = ();
 my %OLD_ONLY_IPS = ();
 my %OLD_DOMAINS = ();
 my %OLD_URLS = ();
 my %OLD_SUBNETS = ();
 my %OLD_TRUE = ();
-my %OLD_TRUE_IPS = ();
 my %OLD_TRUE_ONLY_IPS = ();
 my %OLD_TRUE_DOMAINS = ();
 my %OLD_TRUE_URLS = ();
@@ -143,6 +143,8 @@ my %EX_IPS = ();
 my %EX_DOMAINS = ();
 my %EX_SUBNETS = ();
 
+my %ZAP_OLD_IPS;
+my %ZAP_OLD_TRUE_IPS;
 
 my %resolver_cache;
 
@@ -411,12 +413,14 @@ sub sendRequest
 }
 
 
-sub dbConnect {
+sub dbConnect
+{
 	$DBH = DBI->connect_cached("DBI:mysql:database=".$db_name.";host=".$db_host, $db_user, $db_pass,{mysql_enable_utf8 => 1}) or die DBI->errstr;
 	$DBH->do("set names utf8");
 }
 
-sub set {
+sub set
+{
 	my $param = shift;
 	my $value = shift;
 	my $sth = $DBH->prepare("UPDATE zap2_settings SET value = ? WHERE param = ?");
@@ -425,7 +429,8 @@ sub set {
 	$sth->execute or die DBI->errstr;
 }
 
-sub getParams {
+sub getParams
+{
 	my $sth = $DBH->prepare("SELECT param,value FROM zap2_settings");
 	$sth->execute or die DBI->errstr;
 	while( my $ref = $sth->fetchrow_arrayref ) {
@@ -579,10 +584,11 @@ sub parseDump
 	set('lastAction', 'getResult');
 	set('lastResult', 'got');
 	set('lastDumpDate', time() );
-};
+}
 
 # Cleanup old entries
-sub clearOld {
+sub clearOld
+{
 	foreach my $domain ( keys %OLD_TRUE_DOMAINS ) {
 			delDomain( $OLD_TRUE_DOMAINS{$domain}[0], $OLD_TRUE_DOMAINS{$domain}[1] );
 			$deleted_old_domains++;
@@ -593,10 +599,15 @@ sub clearOld {
 			delUrl( $OLD_TRUE_URLS{$url}[0], $OLD_TRUE_URLS{$url}[1] );
 #			$logger->debug("Deleting url id ".$OLD_TRUE_URLS{$url}[0]." (".$OLD_TRUE_URLS{$url}[1].")");
 	}
-	foreach my $ip ( keys %OLD_TRUE_IPS )
+
+	foreach my $record_id (keys %ZAP_OLD_TRUE_IPS)
 	{
+		foreach my $ip ( keys %{$ZAP_OLD_TRUE_IPS{$record_id}} )
+		{
 			$deleted_old_ips++;
-			delIp( $OLD_TRUE_IPS{$ip}[0], $OLD_TRUE_IPS{$ip}[1] );
+			$logger->debug("Deleting ip $ip for record_id $record_id with id ".$ZAP_OLD_TRUE_IPS{$record_id}{$ip});
+			delIp($ZAP_OLD_TRUE_IPS{$record_id}{$ip}, $ip);
+		}
 	}
 
 	foreach my $ip ( keys %OLD_TRUE_ONLY_IPS ) {
@@ -608,13 +619,14 @@ sub clearOld {
 			$deleted_old_subnets++;
 			delSubnet( $OLD_TRUE_SUBNETS{$net}[0], $OLD_TRUE_SUBNETS{$net}[1] );
 	}
+
 	foreach my $item ( keys %OLD_TRUE ) {
 			$deleted_old_records++;
 			#print $OLD_TRUE{$item}->{id};
 #			$logger->debug("Deleting decision record of id ".$OLD_TRUE{$item}->{id});
 			delRecord($OLD_TRUE{$item}->{id});
 	}
-};
+}
 
 sub processNew {
 	my $resolver = shift;
@@ -785,7 +797,7 @@ sub processNew {
 					next;
 				}
 				
-				if( !defined( $OLD_IPS{$ip} ) )
+				if( !defined( $ZAP_OLD_IPS{$record_id}{$ip} ) )
 				{
 #					print "New ip: ".$ip."\n";
 					my $ipa = new Net::IP($ip);
@@ -794,8 +806,8 @@ sub processNew {
 					$sth->bind_param(1, $record_id);
 					$sth->bind_param(2, $ip_packed);
 					$sth->execute;
-					$OLD_IPS{$ipa->ip()} = 1;
-					$MAIL_ADDED_IPS .= "Added new IP: ".$ipa->ip()."\n";
+					$ZAP_OLD_IPS{$record_id}{$ipa->ip()} = 1;
+					$MAIL_ADDED_IPS .= "Added new IP: ".$ipa->ip()." for id $record_id\n";
 					$logger->debug("New ip: ".$ipa->ip());
 					if($ipa->version() == 4)
 					{
@@ -804,7 +816,7 @@ sub processNew {
 						$added_ipv6_ips++;
 					}
 				} else {
-					delete $OLD_TRUE_IPS{$ip};
+					delete $ZAP_OLD_TRUE_IPS{$record_id}{$ip};
 				}
 			}
 		}
@@ -879,17 +891,15 @@ sub processNew {
 	}
     };
 	$logger->error("Eval: ".$@) if $@;
-};
+}
 
 sub getOld {
 	%OLD = ();
-	%OLD_IPS = ();
 	%OLD_ONLY_IPS = ();
 	%OLD_DOMAINS = ();
 	%OLD_SUBNETS = ();
 	%OLD_URLS = ();
 	%OLD_TRUE = ();
-	%OLD_TRUE_IPS = ();
 	%OLD_TRUE_ONLY_IPS = ();
 	%OLD_TRUE_DOMAINS = ();
 	%OLD_TRUE_SUBNETS = ();
@@ -939,12 +949,12 @@ sub getOld {
 	# Ips
 	$sth = $DBH->prepare("SELECT ip, record_id, id, resolved FROM zap2_ips ORDER BY date_add");
 	$sth->execute or die DBI->errstr;
-	while( my $ref = $sth->fetchrow_arrayref )
+	while( my $ips = $sth->fetchrow_hashref() )
 	{
-		my $old_ip=get_ip($$ref[0]);
-		$OLD_IPS{$old_ip} = $$ref[1];
-		next if($keep_resolved == 1 && $$ref[3] eq "1"); # skeep to delete resolved ips
-		@{$OLD_TRUE_IPS{$old_ip}} = ( $$ref[2], $old_ip );
+		my $old_ip=get_ip($ips->{ip});
+		$ZAP_OLD_IPS{$ips->{record_id}}{$old_ip}=$ips->{id};
+		next if($keep_resolved == 1 && $ips->{resolved} eq "1"); # skeep to delete resolved ips
+		$ZAP_OLD_TRUE_IPS{$ips->{record_id}}{$old_ip}=$ips->{id};
 	}
 
 	# ONLY ips
@@ -974,7 +984,7 @@ sub getOld {
 	while( my $ref = $sth->fetchrow_arrayref ) {
 		$EX_DOMAINS{$$ref[0]} = 1;
 	}
-};
+}
 
 sub Resolve
 {
@@ -1045,7 +1055,7 @@ sub Mail {
 	    };
 	    $logger->error( $@ ) if $@;
 	}
-};
+}
 
 sub delDomain {
 	my $id = shift;
@@ -1057,7 +1067,7 @@ sub delDomain {
 	my $sth = $DBH->prepare("DELETE FROM zap2_domains WHERE id=?");
 	$sth->bind_param( 1, $id );
 	$sth->execute;
-};
+}
 
 sub delUrl {
 	my $id = shift;
@@ -1069,8 +1079,10 @@ sub delUrl {
 	my $sth = $DBH->prepare("DELETE FROM zap2_urls WHERE id=?");
 	$sth->bind_param( 1, $id );
 	$sth->execute;
-};
-sub delIp {
+}
+
+sub delIp
+{
 	my $id = shift;
 	my $ip = shift;
 	
@@ -1080,7 +1092,7 @@ sub delIp {
 	my $sth = $DBH->prepare("DELETE FROM zap2_ips WHERE id=?");
 	$sth->bind_param( 1, $id );
 	$sth->execute;
-};
+}
 
 sub delIpOnly {
 	my $id = shift;
@@ -1092,7 +1104,7 @@ sub delIpOnly {
 	my $sth = $DBH->prepare("DELETE FROM zap2_only_ips WHERE id=?");
 	$sth->bind_param( 1, $id );
 	$sth->execute;
-};
+}
 
 sub delSubnet {
 	my $id = shift;
@@ -1104,7 +1116,8 @@ sub delSubnet {
 	my $sth = $DBH->prepare("DELETE FROM zap2_subnets WHERE id=?");
 	$sth->bind_param( 1, $id );
 	$sth->execute;
-};
+}
+
 sub delRecord {
 	my $id = shift;
 	
@@ -1114,7 +1127,7 @@ sub delRecord {
 	my $sth = $DBH->prepare("DELETE FROM zap2_records WHERE id=?");
 	$sth->bind_param( 1, $id );
 	$sth->execute;
-};
+}
 
 sub processMail {
 	if( $mail_alone == 1 && $MAIL_ALONE ne '' ) {
@@ -1149,7 +1162,7 @@ sub processMail {
 		Mail( $MAILTEXT );
 	}
 	
-};
+}
 
 sub get_ip
 {
@@ -1188,10 +1201,10 @@ sub resolve_async
 				next;
 			}
 			my $ip=$ipa->ip();
-			if( defined( $OLD_IPS{$ip} ) )
+			if( defined( $ZAP_OLD_IPS{$record_id}{$ip} ) )
 			{
 				# delete from old, because we have it.
-				delete $OLD_TRUE_IPS{$ip} if(defined $OLD_TRUE_IPS{$ip});
+				delete $ZAP_OLD_TRUE_IPS{$record_id}{$ip} if(defined $ZAP_OLD_TRUE_IPS{$record_id}{$ip});
 				next;
 			}
 			if ($ipa->iptype() ne "PUBLIC" && $ipa->iptype() ne "GLOBAL-UNICAST")
@@ -1236,9 +1249,9 @@ sub resolve_async
 			$sth->bind_param(2, $ip_packed);
 			$sth->bind_param(3, $host);
 			$sth->execute;
-			$logger->debug("New resolved ip: ".$ipa->ip()." for domain ".$host);
-			$MAIL_ADDED_IPS .= "New resolved IP: ".$ipa->ip()." for domain ".$host."\n";
-			$OLD_IPS{$ipa->ip()} = 1;
+			$logger->debug("New resolved ip: ".$ipa->ip()." for domain ".$host." record_id: ".$record_id);
+			$MAIL_ADDED_IPS .= "New resolved IP: ".$ipa->ip()." for domain ".$host." record_id: ".$record_id." \n";
+			$ZAP_OLD_IPS{$record_id}{$ipa->ip()} = 1;
 		}
 		$cv->end;
 	});
