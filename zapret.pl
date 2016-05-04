@@ -2,6 +2,10 @@
 
 use strict;
 use warnings;
+use File::Basename 'dirname';
+use File::Spec;
+use lib join '/',File::Spec->splitdir(dirname(__FILE__));
+use Zapret;
 use SOAP::Lite;
 use DBI;
 use Data::Dumper;
@@ -51,8 +55,6 @@ Log::Log4perl::init( $log_file );
 
 my $logger=Log::Log4perl->get_logger();
 
-
-
 my $api_url = $Config->{'API.url'} || die "API.url not defined.";
 my $req_file = $Config->{'PATH.req_file'} || die "PATH.req_file not defined.";
 $req_file = $dir."/".$req_file;
@@ -65,6 +67,8 @@ my $db_host = $Config->{'DB.host'} || die "DB.host not defined.";
 my $db_user = $Config->{'DB.user'} || die "DB.user not defined.";
 my $db_pass = $Config->{'DB.password'} || die "DB.password not defined.";
 my $db_name = $Config->{'DB.name'} || die "DB.name not defined.";
+
+my $soap = new Zapret($api_url);
 
 my $resolve = $Config->{'NS.resolve'} || 0;
 
@@ -209,9 +213,6 @@ sub getResult
 {
 	$logger->debug("Getting result...");
 
-	my $soap = SOAP::Lite->service( $api_url );
-
-
 	my @result;
 	eval
 	{
@@ -280,7 +281,6 @@ sub checkDumpDate
 	$logger->debug("Checking dump date...");
 	my $lastDumpDate = getLastDumpDate();
 	$logger->debug("RKN last dump date: ".$lastDumpDate);
-
 	if( $lastDumpDateOld eq '' || $lastDumpDate > $lastDumpDateOld || $force_load)
 	{
 		$logger->debug("lastDumpDate > prev. dump date. Working now.");
@@ -295,8 +295,7 @@ sub getLastDumpDate
 	$ldd_iterations++;
 	my @result;
 	eval {
-		my $soap= SOAP::Lite->service( $api_url );
-		@result = $soap->getLastDumpDateEx();
+		@result=$soap->getLastDumpDateEx();
 	};
 	if( $@ ) {
 		$logger->error("Error while getLastDumpDate: ".$@);
@@ -367,30 +366,8 @@ sub sendRequest
 	{
 		formRequest();
 	}
-	my ( $req, $sig, $buf );
 
-	# request
-	open F, '<'.$req_file || die $!;
-	binmode F;
-	while( (read F, $buf, 65536) != 0 ) {
-		$req .= $buf;
-	}
-	close F;
-
-	# signature
-	open F, '<'.$sig_file || die $!;
-	binmode F;
-	while( (read F, $buf, 65536) != 0 ) {
-		$sig .= $buf;
-	}
-	close F;
-
-	my $soap = SOAP::Lite->service( $api_url );
-	my @result =  $soap->sendRequest(
-	$req,
-	$sig,
-	"2.1"
-	);
+	my @result = $soap->sendRequest($req_file,$sig_file);
 
 	my $res = $result[0];
 	if( $res eq 'true' ) {
@@ -432,22 +409,25 @@ sub getParams
 {
 	my $sth = $DBH->prepare("SELECT param,value FROM zap2_settings");
 	$sth->execute or die DBI->errstr;
-	while( my $ref = $sth->fetchrow_arrayref ) {
-		if( $$ref[0] eq 'lastDumpDate' )
+	while( my $ips = $sth->fetchrow_hashref() )
+	{
+		my $param=$ips->{param};
+		my $value=$ips->{value};
+		if($param eq 'lastDumpDate')
 		{
-			$lastDumpDateOld = $$ref[1];
+			$lastDumpDateOld = $value;
 		}
-		if( $$ref[0] eq 'lastAction' )
+		if($param eq 'lastAction')
 		{
-			$lastAction = $$ref[1];
+			$lastAction = $value;
 		}
-		if( $$ref[0] eq 'lastCode' )
+		if($param eq 'lastCode')
 		{
-			$lastCode = $$ref[1];
+			$lastCode = $value;
 		}
-		if( $$ref[0] eq 'lastResult' )
+		if($param eq 'lastResult' )
 		{
-			$lastResult = $$ref[1];
+			$lastResult = $value;
 		}
 	}
 }
