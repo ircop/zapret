@@ -346,7 +346,7 @@ sub formRequest
 	open TMPL, "<", $template_file or die "Can't open ".$template_file." for reading!\n";
 	while( <TMPL> ) {
 		my $line = $_;
-		$line =~ s/{{TIME}}/$dt/g;
+		$line =~ s/\{\{TIME\}\}/$dt/g;
 		$new .= $line;
 	}
 	close TMPL;
