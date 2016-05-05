@@ -49,7 +49,7 @@ sub sendRequest
 	return $this->{service}->sendRequest(
 		$xmlreq,
 		$xmlreqsig,
-		"2.1"
+		"2.2"
 	);
 }
 
