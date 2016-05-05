@@ -191,7 +191,7 @@ if( $lastResult eq 'send' )
 	while (getResult())
 	{
 		$logger->info("Reestr not yet ready. Waiting...");
-		sleep(5);
+		sleep(10);
 	}
 	exit 0;
 }
@@ -372,9 +372,9 @@ sub sendRequest
 	my $res = $result[0];
 	if( $res eq 'true' ) {
 		# Everyhing OK
-		my $code = $result[2];
-		$logger->debug( $result[1] );
-		set('lastCode', $code);
+		$lastCode = $result[2];
+		$logger->debug("Got code: ".$lastCode);
+		set('lastCode', $lastCode);
 		set('lastAction', 'sendRequest');
 		set('lastActionDate', time );
 		set('lastResult', 'send');
