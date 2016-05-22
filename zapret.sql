@@ -26,7 +26,7 @@ CREATE TABLE `zap2_domains` (
   `id` int(6) unsigned NOT NULL AUTO_INCREMENT,
   `date_add` timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP,
   `record_id` int(6) unsigned NOT NULL,
-  `domain` varchar(60) NOT NULL,
+  `domain` varchar(255) NOT NULL,
   `domain_fixed` varchar(60) NOT NULL,
   PRIMARY KEY (`id`)
 ) ENGINE=MyISAM DEFAULT CHARSET=utf8;
