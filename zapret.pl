@@ -160,7 +160,8 @@ my $MAIL_EXCLUDES = '';
 my $MAIL_ALONE = '';
 
 
-my $resolved_domains=0;
+my $resolved_domains_ipv4=0;
+my $resolved_domains_ipv6=0;
 my $deleted_old_domains=0;
 my $deleted_old_urls=0;
 my $deleted_old_ips=0;
@@ -266,7 +267,7 @@ sub getResult
 
 		parseDump();
 		# статистика
-		$logger->info("Load iterations: ".$ldd_iterations.", resolved domains: ".$resolved_domains);
+		$logger->info("Load iterations: ".$ldd_iterations.", resolved domains ipv4: ".$resolved_domains_ipv4.", resolved domains ipv6: ".$resolved_domains_ipv6);
 		$logger->info("Added: domains: ".$added_domains.", urls: ".$added_urls.", IPv4 ips: ".$added_ipv4_ips.", IPv6 ips: ".$added_ipv6_ips.", subnets: ".$added_subnets.", records: ".$added_records);
 		$logger->info("Deleted: old domains: ".$deleted_old_domains.", old urls: ".$deleted_old_urls.", old ips: ".$deleted_old_ips.", old only ips: ".$deleted_old_only_ips.", old subnets: ".$deleted_old_subnets.", old records: ".$deleted_old_records);
 		my $stop_time=localtime();
@@ -1063,10 +1064,8 @@ sub Resolve
 		$logger->debug("Domain $domain already resolved");
 		return;
 	}
-	my $type="a";
-	$type="*" if($ipv6_nslookup);
 	$resolver_cache{md5_hex(encode_utf8($domain))}=1;
-	resolve_async($cv,$domain,$resolvera,$type,$record_id);
+	resolve_async($cv,$domain,$resolvera,$record_id);
 }
 
 sub Mail {
@@ -1244,15 +1243,14 @@ sub resolve_async
 	my $cv=shift;
 	my $host=shift;
 	my $resolver=shift;
-	my $type=shift;
 	my $record_id=shift;
 	if($host =~ m/([А-Яа-я]+)/gi )
 	{
 		$host=puny_enc($host);
 	}
 	$cv->begin;
-	$resolver->resolve($host, $type, accept => ["a", "aaaa"], sub {
-		$resolved_domains++;
+	$resolver->resolve($host, "a", accept => ["a"], sub {
+		$resolved_domains_ipv4++;
 		for my $record (@_) {
 			my $nr=scalar(@$record);
 			my $ipa = new Net::IP($record->[$nr-1]);
@@ -1270,7 +1268,7 @@ sub resolve_async
 			}
 			if ($ipa->iptype() ne "PUBLIC" && $ipa->iptype() ne "GLOBAL-UNICAST")
 			{
-				$logger->info("Bad ip type: ".$ipa->iptype()." for ip $ip");
+				$logger->info("Bad ip type: ".$ipa->iptype()." for ip $ip host $host");
 				next;
 			}
 			my $exclude = 0;
@@ -1316,5 +1314,76 @@ sub resolve_async
 		}
 		$cv->end;
 	});
+
+	if($ipv6_nslookup)
+	{
+		$cv->begin;
+		$resolver->resolve($host, "aaaa", accept => ["aaaa"], sub {
+		$resolved_domains_ipv6++;
+		for my $record (@_) {
+			my $nr=scalar(@$record);
+			my $ipa = new Net::IP($record->[$nr-1]);
+			if(!defined($ipa))
+			{
+				$logger->error( "Invalid ip address ".$record->[$nr-1]." for domain $host");
+				next;
+			}
+			my $ip=$ipa->ip();
+			if( defined( $ZAP_OLD_IPS{$record_id}{$ip} ) )
+			{
+				# delete from old, because we have it.
+				delete $ZAP_OLD_TRUE_IPS{$record_id}{$ip} if(defined $ZAP_OLD_TRUE_IPS{$record_id}{$ip});
+				next;
+			}
+			if ($ipa->iptype() ne "PUBLIC" && $ipa->iptype() ne "GLOBAL-UNICAST")
+			{
+				$logger->info("Bad ip type: ".$ipa->iptype()." for ip $ip host $host");
+				next;
+			}
+			my $exclude = 0;
+			for my $subnet (keys %EX_SUBNETS)
+			{
+				my $ipadr = NetAddr::IP->new( $ip );
+				my $net = NetAddr::IP->new( $subnet );
+				if( $ipadr && $net ) {
+					if( $ipadr->within($net) ) {
+						#print "Excluding ip ".$ip.": overlaps with excluded subnet ".$subnet."\n";
+						$logger->debug("Excluding ip ".$ip);
+						$MAIL_EXCLUDES .= "Excluding new ip: ".$ip."\n";
+						$exclude = 1;
+						last;
+					}
+				}
+			}
+			if( defined($EX_IPS{$ip}) )
+			{
+				$logger->debug("Excluding ip ".$ip);
+				$exclude = 1;
+			}
+		
+			if( $exclude == 1 ) {
+				next;
+			}
+			if($ipa->version() == 4)
+			{
+				$added_ipv4_ips++;
+			} else {
+				$added_ipv6_ips++;
+			}
+			my $ip_packed=pack("B*",$ipa->binip());
+			# Not in old ips, not in excludes...
+			my $sth = $DBH->prepare("INSERT INTO zap2_ips(record_id, ip, resolved, domain) VALUES(?,?,1,?)");
+			$sth->bind_param(1, $record_id);
+			$sth->bind_param(2, $ip_packed);
+			$sth->bind_param(3, $host);
+			$sth->execute;
+			$logger->debug("New resolved ip: ".$ipa->ip()." for domain ".$host." record_id: ".$record_id);
+			$MAIL_ADDED_IPS .= "New resolved IP: ".$ipa->ip()." for domain ".$host." record_id: ".$record_id." \n";
+			$ZAP_OLD_IPS{$record_id}{$ipa->ip()} = 1;
+		}
+		$cv->end;
+		});
+	}
+
 }
 
