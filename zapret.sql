@@ -91,6 +91,7 @@ CREATE TABLE `zap2_ips` (
   `resolved` int(1) NOT NULL DEFAULT '0',
   `domain` varchar(255) NOT NULL,
   PRIMARY KEY (`id`)
+  KEY `record_id` (`record_id`)
 ) ENGINE=MyISAM DEFAULT CHARSET=utf8;
 /*!40101 SET character_set_client = @saved_cs_client */;
 
