@@ -706,7 +706,12 @@ sub processNew {
 					next;
 				}
 				$processed_domains++;
-				Resolve( $domain, $record_id, $resolver, $cv );
+				if($domain =~ /^\*\./)
+				{
+					$logger->info("Skip to resolve domain '$domain' because it masked");
+				} else {
+					Resolve( $domain, $record_id, $resolver, $cv );
+				}
 				if( !defined( $OLD_DOMAINS{md5_hex(encode_utf8($domain))} ) )
 				{
 #					print "New domain: ".$domain."\n";
