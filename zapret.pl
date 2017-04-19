@@ -27,6 +27,8 @@ use AnyEvent::DNS;
 use Log::Log4perl;
 use Getopt::Long;
 use URI::UTF8::Punycode;
+use File::Path qw(make_path);
+use File::Copy;
 
 $XML::Simple::PREFERRED_PARSER = 'XML::Parser';
 
@@ -62,6 +64,7 @@ my $sig_file = $Config->{'PATH.sig_file'} || die "PATH.sig_file not defined.";
 $sig_file = $dir."/".$sig_file;
 my $template_file = $Config->{'PATH.template_file'} || die "PATH.template_file not defined.";
 $template_file = $dir."/".$template_file;
+my $archive_path = $Config->{'PATH.archive'} || "";
 
 my $db_host = $Config->{'DB.host'} || die "DB.host not defined.";
 my $db_user = $Config->{'DB.user'} || die "DB.user not defined.";
@@ -194,6 +197,7 @@ if( $lastResult eq 'send' )
 		$logger->info("Reestr not yet ready. Waiting...");
 		sleep(10);
 	}
+	$logger->info("Stopping RKN at ".(localtime()));
 	exit 0;
 }
 
@@ -207,6 +211,8 @@ if(checkDumpDate())
 		sleep(5);
 	}
 }
+
+$logger->info("Stopping RKN at ".(localtime()));
 
 exit 0;
 
@@ -249,16 +255,29 @@ sub getResult
 		}
 	} else {
 		unlink $dir.'/dump.xml';
-		unlink $dir.'/arch.zip';
 		unlink $dir.'/dump.xml.sig';
 		my $zip = decode_base64($result[1]);
 
-		open F, '>'.$dir.'/arch.zip' || die "Can't open arch.zip for writing!\n".$! ;
+		my $file = "arch.zip";
+		my $tm=time();
+		if($archive_path)
+		{
+			$file = strftime "arch-%Y-%m-%e-%H_%M_%S.zip", localtime($tm);
+		}
+
+		open F, '>'.$dir."/".$file || die "Can't open $dir/$file for writing!\n".$! ;
 		binmode F;
 		print F $zip;
 		close F;
-	
-		`unzip -o $dir/arch.zip -d $dir/`;
+		`unzip -o $dir/$file -d $dir/`;
+		if($archive_path)
+		{
+			my $apath = strftime "$archive_path/%Y/%Y-%m/%Y-%m-%e", localtime($tm);
+			make_path($apath);
+			copy($dir."/".$file,$apath."/".$file);
+			unlink $dir."/".$file;
+		}
+
 		$logger->debug("Got result, parsing dump.");
 
 		set('lasltAction', 'getResult');
@@ -270,8 +289,6 @@ sub getResult
 		$logger->info("Load iterations: ".$ldd_iterations.", resolved domains ipv4: ".$resolved_domains_ipv4.", resolved domains ipv6: ".$resolved_domains_ipv6);
 		$logger->info("Added: domains: ".$added_domains.", urls: ".$added_urls.", IPv4 ips: ".$added_ipv4_ips.", IPv6 ips: ".$added_ipv6_ips.", subnets: ".$added_subnets.", records: ".$added_records);
 		$logger->info("Deleted: old domains: ".$deleted_old_domains.", old urls: ".$deleted_old_urls.", old ips: ".$deleted_old_ips.", old only ips: ".$deleted_old_only_ips.", old subnets: ".$deleted_old_subnets.", old records: ".$deleted_old_records);
-		my $stop_time=localtime();
-		$logger->info("Stopping RKN at ".$stop_time);
 	}
 	return 0;
 }
