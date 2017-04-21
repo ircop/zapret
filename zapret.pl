@@ -850,7 +850,7 @@ sub processNew {
 				for my $net (keys %EX_SUBNETS)
 				{
 					my $net1 = NetAddr::IP->new( $net );
-					my $net2 = NetAddr::IP->new( $net );
+					my $net2 = NetAddr::IP->new( $subnet );
 					if( $net1 && $net2 ) {
 						if( $net1->within( $net2 ) || $net2->within( $net1 ) ) {
 #							print "Exclude subnet ".$subnet.": overlaps with excluded net ".$net."\n";
