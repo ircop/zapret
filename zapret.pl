@@ -262,7 +262,7 @@ sub getResult
 		my $tm=time();
 		if($archive_path)
 		{
-			$file = strftime "arch-%Y-%m-%e-%H_%M_%S.zip", localtime($tm);
+			$file = strftime "arch-%Y-%m-%d-%H_%M_%S.zip", localtime($tm);
 		}
 
 		open F, '>'.$dir."/".$file || die "Can't open $dir/$file for writing!\n".$! ;
@@ -272,7 +272,7 @@ sub getResult
 		`unzip -o $dir/$file -d $dir/`;
 		if($archive_path)
 		{
-			my $apath = strftime "$archive_path/%Y/%Y-%m/%Y-%m-%e", localtime($tm);
+			my $apath = strftime "$archive_path/%Y/%Y-%m/%Y-%m-%d", localtime($tm);
 			make_path($apath);
 			copy($dir."/".$file,$apath."/".$file);
 			unlink $dir."/".$file;
