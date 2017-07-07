@@ -29,6 +29,7 @@ use Getopt::Long;
 use URI::UTF8::Punycode;
 use File::Path qw(make_path);
 use File::Copy;
+use Email::MIME;
 
 $XML::Simple::PREFERRED_PARSER = 'XML::Parser';
 
@@ -106,7 +107,15 @@ $dns_timeout = int($dns_timeout) if($dns_timeout);
 
 
 my $mail_send = $Config->{'MAIL.send'} || 0;
-my @mail_to = $Config->{'MAIL.to'} || die "MAIL.to not defined.";
+
+my $mails_to = $Config->{'MAIL.to'} || die "MAIL.to not defined.";
+my @mail_to;
+if(ref($mails_to) ne "ARRAY")
+{
+	push(@mail_to, $mails_to);
+} else {
+	@mail_to = @{$mails_to};
+}
 my $smtp_auth = $Config->{'MAIL.auth'} || 0;
 my $smtp_from = $Config->{'MAIL.from'} || die "MAIL.from not defined.";
 my $smtp_host = $Config->{'MAIL.server'} || die "MAIL.server not defined.";
@@ -1090,52 +1099,47 @@ sub Resolve
 	resolve_async($cv,$domain,$resolvera,$record_id);
 }
 
-sub Mail {
+sub Mail
+{
 	my $text = shift;
-	
-	setlocale(LC_TIME, "POSIX");
-	
-	foreach (@mail_to ) {
-	
-	    my $now = time();
-	    my $timezone = strftime("%z", localtime($now));
-	    my $datestring = strftime("Date: %a, %d %b %Y %H:%M:%S %z", localtime($now));
-	
-	    eval {
-		my $to = $_;
-		
-		my $smtp = Net::SMTP->new($smtp_host.':'.$smtp_port, Debug => 0) or do { $logger->error( "Can't connect to SMTP server; $!;"); return; };
-	
+	foreach (@mail_to)
+	{
 		eval {
-		    require MIME::Base64;
-		    require Authen::SASL;
-		} or do { $logger->error( "Need MIME::Base64 and Authen::SASL to do smtp auth."); return; };
-		
-		
-		if( $smtp_auth eq '1' ) {
-		    if( $smtp_login eq '' || $smtp_password eq '' ) {
-			$logger->debug("ERROR! SMTP Auth is enabled, but no login and password defined!");
-			return;
-		    }
-		    $smtp->auth($smtp_login, $smtp_password) or do {$logger->error( "Can't auth on smtp server; $!"); return; };
-		}
+			my $to = $_;
+			my $smtp = Net::SMTP->new($smtp_host.':'.$smtp_port, Debug => 0) or do { $logger->error( "Can't connect to the SMTP server: $!"); return; };
 	
-		$smtp->mail( $smtp_from );
-		$smtp->recipient( $to );
-	
-		$smtp->data();
-		$smtp->datasend("$datestring\n");
-		$smtp->datasend("From: $smtp_from");
-		$smtp->datasend("\n");
-		$smtp->datasend("To: ".$to."\n");
-		$smtp->datasend("Subject: zapret update!");
-		$smtp->datasend("\n");
-		$smtp->datasend("Content-type: text/plain; charset=utf-8\n");
-		$smtp->datasend( $text );
-		$smtp->dataend();
-		$smtp->quit;
-	    };
-	    $logger->error( $@ ) if $@;
+			eval {
+			    require MIME::Base64;
+			    require Authen::SASL;
+			} or do { $logger->error( "Need MIME::Base64 and Authen::SASL to do smtp auth."); return; };
+			
+			
+			if( $smtp_auth eq '1' )
+			{
+				if( $smtp_login eq '' || $smtp_password eq '' )
+				{
+					$logger->debug("ERROR! SMTP Auth is enabled, but no login and password defined!");
+					return;
+				}
+				$smtp->auth($smtp_login, $smtp_password) or do {$logger->error( "Can't auth on smtp server: $!"); return; };
+			}
+			$smtp->mail( $smtp_from );
+			$smtp->recipient( $to );
+			my $email = Email::MIME->create(
+				header_str => [ From => $smtp_from, To => $to, Subject => 'zapret update!'],
+				attributes => {
+					content_type => "text/plain",
+					charset      => "UTF-8",
+					encoding     => "quoted-printable"
+				},
+				body_str => $text
+			);
+			$smtp->data();
+			$smtp->datasend($email->as_string());
+			$smtp->dataend();
+			$smtp->quit;
+		};
+		$logger->error("Email send error: $@") if $@;
 	}
 }
 
