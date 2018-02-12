@@ -11,7 +11,7 @@ use DBI;
 use Data::Dumper;
 use MIME::Base64;
 use utf8;
-use XML::Simple;
+use XML::Simple qw(:strict);
 use URI 1.69;
 use NetAddr::IP;
 use Digest::MD5 qw(md5_hex);
@@ -293,7 +293,7 @@ sub getResult
 		set('lastResult', 'got');
 		set('lastDumpDate', time);
 
-		parseDump();
+		parseDump($dir.'/dump.xml');
 		# статистика
 		$logger->info("Load iterations: ".$ldd_iterations.", resolved domains ipv4: ".$resolved_domains_ipv4.", resolved domains ipv6: ".$resolved_domains_ipv6);
 		$logger->info("Added: domains: ".$added_domains.", urls: ".$added_urls.", IPv4 ips: ".$added_ipv4_ips.", IPv6 ips: ".$added_ipv6_ips.", subnets: ".$added_subnets.", records: ".$added_records);
@@ -459,114 +459,155 @@ sub getParams
 	}
 }
 
-
-sub parseDump
+sub parseContent
 {
-	$logger->debug("Parsing dump...");
+	my $content = shift;
+	my ( $decision_number, $decision_org, $decision_date, $entry_type, $include_time, $block_type );
+	$decision_number = $decision_org = $decision_date = $entry_type = '';
+	my $decision_id = $content->{id};
+	$entry_type = '';
 
-	my $xml = new XML::Simple;
-	my $data = $xml->XMLin($dir.'/dump.xml');
-	foreach my $k (keys %{$data->{content}})
+	$decision_number = $content->{decision}->{number} if defined( $content->{decision}->{number} );
+	$decision_org = $content->{decision}->{org} if defined( $content->{decision}->{org} );
+	$decision_date = $content->{decision}->{date} if defined( $content->{decision}->{org} );
+	$entry_type = $content->{entryType} if defined( $content->{entryType} );
+	$include_time = $content->{includeTime} if defined( $content->{includeTime} );
+
+	$block_type = $content->{blockType} if(defined($content->{blockType}));
+
+	my %item = (
+		'entry_type'	=> $entry_type,
+		'decision_num'	=> $decision_number,
+		'decision_id'	=> $decision_id,
+		'decision_date'	=> $decision_date,
+		'decision_org'	=> $decision_org,
+		'include_time'	=> $include_time,
+		'block_type'	=> $block_type
+	);
+
+	my @domains = ();
+	my @urls = ();
+	my @ips = ();
+	my @subnets = ();
+	my $blockType=defined($content->{blockType}) ? $content->{blockType} : "default";
+	# Domains
+	if( defined( $content->{domain} ) )
 	{
-		eval {
-			my ( $decision_number, $decision_org, $decision_date, $entry_type, $include_time );
-			$decision_number = $decision_org = $decision_date = $entry_type = '';
-			my $decision_id = $k;
-			$entry_type = '';
-			my $content = $data->{content}->{$k};
-			$decision_number = $content->{decision}->{number} if defined( $content->{decision}->{number} );
-			$decision_org = $content->{decision}->{org} if defined( $content->{decision}->{org} );
-			$decision_date = $content->{decision}->{date} if defined( $content->{decision}->{org} );
-			$entry_type = $content->{entryType} if defined( $content->{entryType} );
-			$include_time = $content->{includeTime} if defined( $content->{includeTime} );
-	
-			my %item = (
-				'entry_type'	=> $entry_type,
-				'decision_num'	=> $decision_number,
-				'decision_id'	=> $decision_id,
-				'decision_date'	=> $decision_date,
-				'decision_org'	=> $decision_org,
-				'include_time'	=> $include_time
-			);
-
-			my @domains = ();
-			my @urls = ();
-			my @ips = ();
-			my @subnets = ();
-			my $blockType=defined($content->{blockType}) ? $content->{blockType} : "default";
-
-#			if($blockType ne "domain" && $blockType ne "default")
-#			{
-#				$logger->error("Not recognized blockType: $blockType");
-#			}
-			#пишем домены, если только стоит тип блокировки по домену
-			# Domains
-			if( defined( $content->{domain} ) )
+		if(ref($content->{domain}) eq 'ARRAY')
+		{
+			foreach( @{$content->{domain}} )
 			{
-				if(ref($content->{domain}) eq 'ARRAY')
-				{
-					foreach( @{$content->{domain}} )
-					{
-						push @domains, $_;
-					}
+				if( ref($_) eq 'HASH' && defined($_->{content}) ) {
+					push @domains, $_->{content};
+				} else {
+					push @domains, $_;
+				}
+			}
+		} else {
+			if( ref($content->{domain}) eq 'HASH' && defined($content->{domain}->{content}) ) {
+				push @domains, $content->{domain}->{content};
 			} else {
 				push @domains, $content->{domain};
 			}
-			}
-			$item{'domains'} = \@domains;
-
-			# URLs
-			if( defined( $content->{url} ) )
-			{
-				if( ref($content->{url}) eq 'ARRAY' )
-				{
-					foreach( @{$content->{url}} )
-					{
-						push @urls, $_;
-					}
-				} else {
-					push @urls, $content->{url};
-				}
-			}
-			$item{'urls'} = \@urls;
-		
-			# IPs
-			if( defined( $content->{ip} ) )
-			{
-				if( ref($content->{ip}) eq 'ARRAY' )
-				{
-					foreach( @{$content->{ip}} )
-					{
-						push @ips, $_;
-					}
-				} else {
-					push @ips, $content->{ip};
-				}
-			}
-			$item{'ips'} = \@ips;
-		
-			# Subnets
-			if( defined( $content->{ipSubnet} ) )
-			{
-				if( ref($content->{ipSubnet}) eq 'ARRAY' )
-				{
-					foreach( @{$content->{ipSubnet}} )
-					{
-						push @subnets, $_;
-					}
-				} else {
-					push @subnets, $content->{ipSubnet};
-				}
-			}
-			$item{'subnets'} = \@subnets;
-	
-#			$logger->debug( " -- Decision (id ".$decision_id."): ".$decision_number.", from ".$decision_date.", org: ".$decision_org." \n" );
-	
-			$NEW{$decision_id} = \%item;
-		};
-		$logger->error("Eval! ".$@) if $@;
+		}
 	}
-	
+	$item{'domains'} = \@domains;
+
+	# URLs
+	if( defined( $content->{url} ) )
+	{
+		if( ref($content->{url}) eq 'ARRAY' )
+		{
+			foreach( @{$content->{url}} )
+			{
+				if( ref($_) eq 'HASH' && defined($_->{content}) ) {
+					push @urls, $_->{content};
+				} else {
+					push @urls, $_;
+				}
+			}
+		} else {
+			if( ref($content->{url}) eq 'HASH' && defined($content->{url}->{content})) {
+				push @urls, $content->{url}->{content};
+			} else {
+				push @urls, $content->{url};
+			}
+		}
+	}
+	$item{'urls'} = \@urls;
+
+	# IPs
+	if( defined( $content->{ip} ) )
+	{
+		if( ref($content->{ip}) eq 'ARRAY' )
+		{
+			foreach( @{$content->{ip}} )
+			{
+				if( ref($_) eq 'HASH' && defined($_->{content}) ) {
+					push @ips, $_->{content};
+				} else {
+					push @ips, $_;
+				}
+			}
+		} else {
+			if( ref($content->{ip}) eq 'HASH' && defined($content->{ip}->{content})) {
+				push @ips, $content->{ip}->{content};
+			} else {
+				push @ips, $content->{ip};
+			}
+		}
+	}
+	$item{'ips'} = \@ips;
+
+	# Subnets
+	if( defined( $content->{ipSubnet} ) )
+	{
+		if( ref($content->{ipSubnet}) eq 'ARRAY' )
+		{
+			foreach( @{$content->{ipSubnet}} )
+			{
+				if( ref($_) eq 'HASH' && defined($_->{content})) {
+					push @subnets, $_->{content};
+				} else {
+					push @subnets, $_;
+				}
+			}
+		} else {
+			if( ref($content->{ipSubnet}) eq 'HASH' && defined($content->{ipSubnet}->{content}) ) {
+				push @subnets, $content->{ipSubnet}->{content};
+			} else {
+				push @subnets, $content->{ipSubnet};
+			}
+		}
+	}
+	$item{'subnets'} = \@subnets;
+
+	$NEW{$decision_id} = \%item;
+}
+
+sub parseDump
+{
+	my $xml_file = shift;
+	$logger->debug("Parsing dump from file '$xml_file'...");
+
+	my $xml = new XML::Simple;
+	my $data = $xml->XMLin($xml_file, ForceArray=> 0, KeyAttr => {});
+
+	my $ref_type = ref($data->{content});
+	eval {
+		if($ref_type eq 'ARRAY')
+		{
+			foreach my $arr (@{$data->{content}})
+			{
+				parseContent($arr);
+			}
+		} elsif ($ref_type eq 'HASH')
+		{
+			parseContent($data->{content});
+		}
+	};
+	$logger->error("Eval error: ".$@) if $@;
+
 	# Dump parsed.
 	# Get old data from DB
 	getOld();
@@ -689,7 +730,7 @@ sub processNew {
 						$MAIL_EXCLUDES .= "Excluding URL (caused by excluded domain ".$url_domain."): ".$url."\n";
 						next;
 					}
-					Resolve( $url_domain, $record_id, $resolver, $cv);
+					Resolve( $url_domain, $record_id, $resolver, $cv) if($resolve == 1);
 				}
 				
 				
@@ -732,11 +773,14 @@ sub processNew {
 					next;
 				}
 				$processed_domains++;
-				if($domain =~ /^\*\./)
+				if($resolve == 1)
 				{
-					$logger->info("Skip to resolve domain '$domain' because it masked");
-				} else {
-					Resolve( $domain, $record_id, $resolver, $cv );
+					if($domain =~ /^\*\./)
+					{
+						$logger->info("Skip to resolve domain '$domain' because it masked");
+					} else {
+						Resolve( $domain, $record_id, $resolver, $cv );
+					}
 				}
 				if( !defined( $OLD_DOMAINS{md5_hex(encode_utf8($domain))} ) )
 				{
